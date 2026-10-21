@@ -74,6 +74,9 @@ o_t = S @ (q_t * scale)
 
 ## 当前限制
 
+- SoC 支持 `ascend910b`、`ascend910_93`、`ascend950` 和 `ascend960dt`。A6 首版复用 A5
+  arch35 AIV 实现；接口和计算语义不变，A6 真机与 camodel 精度/性能验收见
+  [A6 环境配置与验证方案](docs/validation.md)。
 - `q/k/v/out` 仅支持 `BF16`。
 - Q/K/V 直接非连续访问要求 feature stride 为 1、head 间不重叠、token 间不重叠且 stride 为正；
   BSND 在 `B>1` 时还要求 `batchStride == T * tokenStride`。已验证的 feature-gap、zero-stride
@@ -82,7 +85,7 @@ o_t = S @ (q_t * scale)
 - `A_log/dt_bias` 支持 `FP32`。
 - `cu_seqlens` 为必传、与 q 同设备的 INT32/INT64 Tensor；offset 必须单调不减，末项不得超过输入
   token capacity。A2/A3 支持超过 8 token 的 dense 单序列与 varlen 分段，内部按 8-token 窗口递推；
-  A5 每段序列长度仍必须小于等于 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
+  A5/A6 每段序列长度仍必须小于等于 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
   更新有定义，padding tail 输出不作保证。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
 - 支持 V-first `[state_capacity,HV,V,K]` 和 K-first `[state_capacity,HV,K,V]`，state dtype 为

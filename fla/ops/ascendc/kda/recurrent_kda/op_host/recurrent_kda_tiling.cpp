@@ -63,7 +63,10 @@ void RecurrentKdaTiling::InitCompileInfo()
     const auto &ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
-    compileInfo_.isA5 = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510;
+    constexpr int32_t DAV_9201 = 9201;
+    const auto npuArch = ascendcPlatform.GetCurNpuArch();
+    compileInfo_.useArch35 =
+        npuArch == NpuArch::DAV_3510 || static_cast<int32_t>(npuArch) == DAV_9201;
 
     if (compileInfo_.aivNum <= 0) {
         OP_LOGE(context_->GetNodeName(), "aivNum <= 0");
@@ -139,7 +142,7 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     CopyOptionalOriginShape(context_, ACC_TOKEN_INDEX, ctx.acceptedTokensShape);
     ctx.aivNum = compileInfo_.aivNum;
     ctx.ubSize = compileInfo_.ubSize;
-    ctx.isA5 = compileInfo_.isA5 ? 1 : 0;
+    ctx.useArch35 = compileInfo_.useArch35 ? 1 : 0;
     ctx.stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
     ctx.gateDtype = context_->GetInputDesc(GATE_INDEX)->GetDataType();
     ctx.betaDtype = context_->GetInputDesc(BETA_INDEX)->GetDataType();

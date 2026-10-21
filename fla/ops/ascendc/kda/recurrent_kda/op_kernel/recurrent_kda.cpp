@@ -11,7 +11,9 @@
  * \file recurrent_kda.cpp
  * \brief
  */
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+// A5 (dav-c310) and A6 (Ascend960DT, dav-9201) share the arch35 AIV kernel.
+#if (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310) || \
+    (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
 #include "arch35/recurrent_kda.h"
 #else
 #include "recurrent_kda.h"

@@ -427,7 +427,7 @@ def _report_validated_combo(cann: str, torch_version: str) -> None:
 def _report_cann_requirement(cann: str) -> None:
     """Report the CANN floor of the target tier (informational).
 
-    950 (a5) needs a newer CANN baseline than 910B/910_93, so the same CANN
+    A5/A6 need newer CANN baselines than 910B/910_93, so the same CANN
     version can satisfy one tier and not another. The check stays informational:
     a build on an older CANN fails loudly later, and a false failure here would
     block environments that work.

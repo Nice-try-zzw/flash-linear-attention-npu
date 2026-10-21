@@ -2,7 +2,7 @@
 
 The guard is inert for legacy/local builds that lack the generated
 ``_build_meta.py`` / ``_compat.py`` files; only tiered PyPI wheels
-(flash-linear-attention-npu-a2/a3/a5) get version checks.
+(flash-linear-attention-npu-a2/a3/a5/a6) get version checks.
 
 Notes:
 - Chip-tier detection via device-name mapping was intentionally NOT included:
@@ -80,7 +80,7 @@ def _compat() -> dict:
 
 
 def tier() -> str | None:
-    """Which product tier this wheel was built for (a2/a3/a5), else None.
+    """Which product tier this wheel was built for (a2/a3/a5/a6), else None.
 
     Purely informational: it lets a diagnosis or an install check state which
     wheel is in site-packages without trusting the directory name, and no

@@ -98,7 +98,7 @@ shape、storage、stride 和 offset，kernel 按 tiling
 另外传入独立的 `finalState` 输出，仅为该输出保留一次必要的 `ViewCopy`。`cuSeqlensOptional` 为空时，BSND
 按 batch 行划分序列，TND 视为一条序列；提供时仅在 host 检查 rank/dtype，具体 offset 值由 device kernel 读取，
 因而可在 ACLGraph capture/replay 中变化。首项必须为 0，offset 必须单调不减，末项不得超过输入 token capacity，
-A2/A3 按固定时间窗口处理每段序列，不再限制每段长度为 8；A5 每段仍不超过 8。
+A2/A3 按固定时间窗口处理每段序列，不再限制每段长度为 8；A5/A6 每段仍不超过 8。
 输入、输出、workspace 和 executor 必须保持有效，直到 stream 完成。
 
 ### 3.2 调用示例
@@ -185,6 +185,8 @@ recurrent_kda<<<blockDim, nullptr, stream>>>(
 
 ## 7. 已知限制
 
+- SoC 支持 `ascend910b`、`ascend910_93`、`ascend950` 和 `ascend960dt`。A6 复用 A5
+  arch35 AIV 实现；设备验收范围见 [A6 环境配置与验证方案](validation.md)。
 - `q/k/v/out` 当前仅支持 BF16。
 - `K/V` 当前仅支持 `K=128,V=128` 或 `K=128,V=256` 两档枚举。
 - Python/aclnn 入口支持符合 stride 约束的非连续 Q/K/V 与 `initial_state`。
@@ -200,7 +202,7 @@ recurrent_kda<<<blockDim, nullptr, stream>>>(
 - 末项小于 capacity 时，kernel 仅处理有效前缀并逐行跳过零长度序列；padding tail 输出不作保证。
 - state 支持 V-first 与 K-first，支持 FP32/BF16，以及原位/非原位 final state。
 - 非连续 state 仅允许 slot/head 外层维存在间隔，最后两维必须为行主序稠密矩阵，且外层地址区间不得重叠。
-- A2/A3 支持超过 8 token 的 dense/varlen 序列，内部以最多 8 token 的窗口顺序递推；A5 的每段序列长度仍必须 <=8。Token 容量和元数据宽度须能由现有 uint32 tiling 字段表示，地址计算使用 64 位并保留容量校验。
+- A2/A3 支持超过 8 token 的 dense/varlen 序列，内部以最多 8 token 的窗口顺序递推；A5/A6 的每段序列长度仍必须 <=8。Token 容量和元数据宽度须能由现有 uint32 tiling 字段表示，地址计算使用 64 位并保留容量校验。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
 - `use_gate_in_kernel=false` 时 `A_log/dt_bias/safe_gate` 必须为空或 false。
 

@@ -29,10 +29,15 @@ npu-smi info
 | A2   | `ascend910b`              |
 | A3   | `ascend910_93`            |
 | A5   | `ascend950`               |
+| A6   | `ascend960dt`             |
+
+A6 已接入构建、产品 tier 和 `recurrent_kda` 的 arch35 AIV 路径；设备精度与性能验收基线见
+[`recurrent_kda` A6 验证方案](fla/ops/ascendc/kda/recurrent_kda/docs/validation.md)。
 
 ### Step 1. 部署 CANN 开发环境
 
-安装 toolkit 与对应机型 ops 两个包（A2/A3：CANN ≥ 8.5.2；A5：CANN ≥ 9.0.0），下载页：[CANN 社区下载页](https://www.hiascend.com/developer/download/community/result?module=cann)
+安装 toolkit 与对应机型 ops 两个包（A2/A3：CANN ≥ 8.5.2；A5：CANN ≥ 9.0.0；
+A6：CANN ≥ 9.2.0），下载页：[CANN 社区下载页](https://www.hiascend.com/developer/download/community/result?module=cann)
 
 - `Ascend-cann-toolkit_<version>_linux-<arch>.run`
 - `Ascend-cann-<chip>-ops_<version>_linux-<arch>.run`
@@ -55,7 +60,7 @@ python scripts/check_npu_env.py            # 无 NPU 的纯构建环境可加 --
 #### 2.2 编译
 
 ```sh
-FLA_NPU_SOC=ascend910b python scripts/build_wheel.py            # A2；A3→ascend910_93，A5→ascend950
+FLA_NPU_SOC=ascend910b python scripts/build_wheel.py            # A2；A3→ascend910_93，A5→ascend950，A6→ascend960dt
 
 # 可选：只构建指定算子；其余环境变量见开发者指南
 FLA_NPU_OPS=chunk_fwd_o,chunk_bwd_dv_local FLA_NPU_SOC=ascend910b python scripts/build_wheel.py
