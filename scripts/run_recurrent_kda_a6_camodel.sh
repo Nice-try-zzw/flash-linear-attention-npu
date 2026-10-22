@@ -198,8 +198,9 @@ assert "initial_state.detach().clone()" in source, (
     f"installed wheel at {fla_npu.__file__} predates the recurrent_kda "
     "non-inplace scratch-state fix"
 )
-print("[A6-CAMODEL] installed fla_npu", fla_npu.__version__, fla_npu.__file__)
+print("[A6-CAMODEL] installed fla_npu", getattr(fla_npu, "__version__", "unknown"), fla_npu.__file__)
 print("[A6-CAMODEL] stable source", _stable.__file__)
+print("[A6-CAMODEL] SCRATCH_FIX_LOADED")
 ' || die "installed wheel is stale; rebuild and reinstall the a6 wheel"
 fi
 

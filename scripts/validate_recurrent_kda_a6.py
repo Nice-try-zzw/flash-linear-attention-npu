@@ -121,10 +121,10 @@ CASES: tuple[Case, ...] = (
         "varlen_empty_sequences",
         ("core", "full"),
         layout="TND",
-        tokens=17,
+        tokens=16,
         heads=2,
         value_heads=4,
-        lengths=(1, 0, 7, 0, 9),
+        lengths=(1, 0, 7, 0, 8),
         normalize_qk=True,
         gate_dtype="bf16",
     ),
@@ -371,6 +371,16 @@ def build_cpu_inputs(case: Case) -> dict[str, Any]:
     generator = torch.Generator().manual_seed(20261021)
     normal = lambda shape, scale: torch.randn(shape, generator=generator) * scale
     offsets = _make_offsets(case)
+    segment_lengths = (
+        list(case.lengths)
+        if case.lengths is not None
+        else (([case.tokens] * case.batch) if case.layout == "BSND" else [case.tokens])
+    )
+    if segment_lengths and max(segment_lengths) > 8:
+        raise ValueError(
+            f"{case.name}: A6 arch35 supports at most 8 tokens per sequence, "
+            f"got lengths {segment_lengths}"
+        )
     if case.lengths is not None:
         capacity = sum(case.lengths)
         prefix_shape = (capacity,) if case.layout == "TND" else (1, capacity)

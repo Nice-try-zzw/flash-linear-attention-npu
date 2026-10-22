@@ -16,8 +16,13 @@ A6 实现使用 `ascend960dt`、`Ascend960DT_968B7`、`dav-9201` 和
 `initial_state` 全零后运行 FP64 参考实现得到的指标完全一致。根因不是 A6 arch35
 kernel 算术，而是 Stable-ABI 的 `inplace_final_state=False` 路径使用
 `torch.empty_like(initial_state)` 创建 scratch，却没有先复制调用方的
-`initial_state`。该路径已改为 `initial_state.clone()`，并增加离线回归
+`initial_state`。该路径已改为 `initial_state.detach().clone()`，并增加离线回归
 `tests/test_stable_recurrent_kda.py` 检查 scratch 内容、独立存储和输入 state 不变。
+
+core 矩阵中 `varlen_empty_sequences` 的唯一失败也定位为测试用例越界：原 lengths
+`[1,0,7,0,9]` 中最后一段为 9，违反 A6 arch35 的每段 `<=8` 约束。kernel 按预期
+拒绝该输入后没有写输出，故对拍读到未初始化 buffer。用例现改为
+`[1,0,7,0,8]`（T=16），脚本在构造输入时会主动拒绝任何长度大于 8 的 A6 case。
 
 ## 2. 代码与环境映射
 
@@ -251,7 +256,7 @@ RESULT: PASS 1/1 cases
 | `raw_gate_gva_bf16` | BSND，B1/T4/H2/HV4/V128 | BF16/BF16/FP32 | raw gate、GVA、L2 norm、beta sigmoid + neg |
 | `safe_gate_fp16_v256` | BSND，B2/T2/H1/HV2/V256 | FP16/FP16/FP32 | safe gate、FP16、`V=256` |
 | `kfirst_bf16_state` | BSND，B1/T4/H2/HV4/V128 | FP32/FP32/BF16 | K-first state |
-| `varlen_empty_sequences` | TND，T17，lengths `[1,0,7,0,9]` | BF16/FP32/FP32 | 多个空序列、每段 <=8 |
+| `varlen_empty_sequences` | TND，T16，lengths `[1,0,7,0,8]` | BF16/FP32/FP32 | 多个空序列、每段 <=8 |
 | `packed_indices_repeat` | BSND，B1/T8/H2/HV4/V128 | FP32/FP32/BF16 | packed INT64 indices、重复 slot、原位 state |
 | `noncontiguous_qkv_state` | BSND，B1/T4/H2/HV4/V128 | FP16/BF16/FP32 | Q/K/V feature gap、state head gap |
 | `speculative_indices_int32` | BSND，B2/T4/H1/HV2/V128 | FP32/FP32/FP32 | 二维 INT32 indices、accepted tokens |
@@ -311,7 +316,7 @@ bash tests/atk/run_test_cpu.sh -op=recurrent_kda -soc=ascend960dt \
 先在目标 Python 环境确认实际导入的是新 wheel，而不是旧 site-packages：
 
 ```bash
-python -c "import inspect, fla_npu, fla_npu.ops.ascendc._stable as s; print(fla_npu.__version__); print(fla_npu.__file__); print(s.__file__); print('detach().clone' in inspect.getsource(s.npu_recurrent_kda))"
+python -c "import inspect, fla_npu, fla_npu.ops.ascendc._stable as s; print(getattr(fla_npu, '__version__', 'unknown')); print(fla_npu.__file__); print(s.__file__); print('detach().clone' in inspect.getsource(s.npu_recurrent_kda))"
 ```
 
 最后一项必须为 `True`。随后运行同输入的 non-inplace 与 inplace 对照：
