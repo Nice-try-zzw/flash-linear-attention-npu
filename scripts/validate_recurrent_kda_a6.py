@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -753,6 +754,11 @@ def main() -> int:
         "torch": torch.__version__,
         "torch_npu": getattr(torch_npu, "__version__", "unknown"),
         "device": str(device),
+        "camodel": {
+            "enabled": os.getenv("FLA_NPU_CAMODEL_MODE") == "1",
+            "sim_dir": os.getenv("FLA_NPU_CAMODEL_SIM_DIR"),
+            "shim": os.getenv("FLA_NPU_CAMODEL_SHIM"),
+        },
         "criteria": {
             "cosine_min": 0.999,
             "relative_l2_max": 0.01,

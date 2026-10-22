@@ -117,6 +117,41 @@ python scripts/validate_recurrent_kda_a6.py \
 
 ### 5.2 A6 运行
 
+推荐使用 camodel 专用入口。它负责加载 CANN 和 wheel 环境、把 camodel 放到
+`LD_LIBRARY_PATH` 首位、设置 `ASCEND_TDT_UNINIT=1` 和 `LD_PRELOAD` shim，并在同一
+Python 进程内串行执行整组用例：
+
+```bash
+bash scripts/run_recurrent_kda_a6_camodel.sh \
+  --cann /path/to/cann-9.2.0 \
+  --simdir /path/to/cann-9.2.0/x86_64-linux/simulator/dav_9201/camodel \
+  --shim /absolute/path/to/shim_soc.so \
+  --package-env /path/to/site-packages/fla_npu/opp/vendors/fla_npu_transformer/bin/set_env.bash \
+  --python /path/to/python \
+  --suite smoke \
+  --case smoke_bsnd_fp32 \
+  --device 0
+```
+
+也可以使用环境变量：
+
+```bash
+export CANN_HOME=/path/to/cann-9.2.0
+export SIM_DIR="$CANN_HOME/x86_64-linux/simulator/dav_9201/camodel"
+export SHIM_SOC=/absolute/path/to/shim_soc.so
+export FLA_NPU_ENV=/path/to/fla_npu_transformer/bin/set_env.bash
+export FLA_NPU_PYTHON=/path/to/python
+
+bash scripts/run_recurrent_kda_a6_camodel.sh --suite smoke
+```
+
+运行前可用 `--dry-run` 检查最终解析出的 Python 命令。默认单次运行超时为 21600 秒；
+JSON 和完整日志写到 `outputs/recurrent_kda_a6_camodel/`。camodel 在全部 case 完成后
+析构崩溃时可能返回 139，wrapper 会保留真实退出码并打印 JSON 中的
+`PASS/FAIL N/M cases`，精度结果以 JSON 为准。
+
+不经过 wrapper、已手工配置好环境时，也可以直接运行 Python：
+
 ```bash
 # 单个最小 dense case
 python scripts/validate_recurrent_kda_a6.py \
@@ -172,20 +207,42 @@ RESULT: PASS 1/1 cases
 | core | 无 `cu_seqlens`、safe gate FP16、`V=256`、BF16/K-first state、TND 空序列、重复 state slot、非连续 QKV/state |
 | full | core + speculative INT32 indices、无 final state、`initial_state=None`、同进程确定性 |
 
-完整场景列表：
+完整用例表（所有 case 均为 `K=128`、BF16 QKV）：
 
-1. `smoke_bsnd_fp32`
-2. `dense_no_cu`
-3. `raw_gate_gva_bf16`
-4. `safe_gate_fp16_v256`
-5. `kfirst_bf16_state`
-6. `varlen_empty_sequences`
-7. `packed_indices_repeat`
-8. `noncontiguous_qkv_state`
-9. `speculative_indices_int32`
-10. `no_final_state_non_inplace`
-11. `initial_state_none`
-12. `determinism_gva`
+| Case | Layout/Shape | Gate/Beta/State | 关键分支 |
+| --- | --- | --- | --- |
+| `smoke_bsnd_fp32` | BSND，B1/T2/H1/HV1/V128 | FP32/FP32/FP32 V-first | 最小 dense、FP64 golden |
+| `dense_no_cu` | BSND，B2/T3/H1/HV1/V128 | FP32/FP32/FP32 | 不传 `cu_seqlens`，多 batch |
+| `raw_gate_gva_bf16` | BSND，B1/T4/H2/HV4/V128 | BF16/BF16/FP32 | raw gate、GVA、L2 norm、beta sigmoid + neg |
+| `safe_gate_fp16_v256` | BSND，B2/T2/H1/HV2/V256 | FP16/FP16/FP32 | safe gate、FP16、`V=256` |
+| `kfirst_bf16_state` | BSND，B1/T4/H2/HV4/V128 | FP32/FP32/BF16 | K-first state |
+| `varlen_empty_sequences` | TND，T17，lengths `[1,0,7,0,9]` | BF16/FP32/FP32 | 多个空序列、每段 <=8 |
+| `packed_indices_repeat` | BSND，B1/T8/H2/HV4/V128 | FP32/FP32/BF16 | packed INT64 indices、重复 slot、原位 state |
+| `noncontiguous_qkv_state` | BSND，B1/T4/H2/HV4/V128 | FP16/BF16/FP32 | Q/K/V feature gap、state head gap |
+| `speculative_indices_int32` | BSND，B2/T4/H1/HV2/V128 | FP32/FP32/FP32 | 二维 INT32 indices、accepted tokens |
+| `no_final_state_non_inplace` | BSND，B1/T2/H1/HV1/V128 | FP32/FP32/FP32 | 不返回 final state、输入 state 不被修改 |
+| `initial_state_none` | BSND，B1/T3/H2/HV4/V128 | BF16/FP32/FP32 | raw+safe gate、wrapper 创建零 state |
+| `determinism_gva` | BSND，B2/T8/H2/HV4/V128 | BF16/FP32/FP32 | GVA、beta sigmoid、同进程重复两次 |
+
+单个用例命令：
+
+```bash
+bash scripts/run_recurrent_kda_a6_camodel.sh \
+  --suite full \
+  --case <case-name> \
+  --device 0
+```
+
+例如仅运行 GVA raw gate：
+
+```bash
+bash scripts/run_recurrent_kda_a6_camodel.sh \
+  --suite full \
+  --case raw_gate_gva_bf16 \
+  --device 0
+```
+
+一次性运行多个指定 case：重复传入 `--case`。
 
 ## 6. 正式 ATK（环境恢复后）
 
