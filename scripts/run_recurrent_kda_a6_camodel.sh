@@ -15,6 +15,7 @@ OUTPUT_ROOT="${CAMODEL_OUTPUT_ROOT:-${REPO_ROOT}/outputs/recurrent_kda_a6_camode
 JSON_PATH=""
 DRY_RUN=FALSE
 SKIP_PREFLIGHT=FALSE
+SKIP_PACKAGE_CHECK=FALSE
 CASE_ARGS=()
 
 usage() {
@@ -41,6 +42,7 @@ Options:
   --output-root <path>        Log/JSON root.
   --json <path>               Exact JSON output path.
   --skip-preflight            Skip the no-NPU CPU harness self-check.
+  --skip-package-check        Skip the installed-wheel scratch-fix check.
   --dry-run                   Print the resolved command and exit.
   -h, --help                  Show this help.
 
@@ -71,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --output-root) OUTPUT_ROOT="${2:?missing --output-root value}"; shift 2 ;;
     --json) JSON_PATH="${2:?missing --json value}"; shift 2 ;;
     --skip-preflight) SKIP_PREFLIGHT=TRUE; shift ;;
+    --skip-package-check) SKIP_PACKAGE_CHECK=TRUE; shift ;;
     --dry-run) DRY_RUN=TRUE; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -182,6 +185,22 @@ fi
 if [[ "$SKIP_PREFLIGHT" != "TRUE" ]]; then
   "$PYTHON_BIN" "${REPO_ROOT}/scripts/validate_recurrent_kda_a6.py" \
     --suite "$SUITE" "${CASE_ARGS[@]}" --cpu-self-check
+fi
+
+if [[ "$SKIP_PACKAGE_CHECK" != "TRUE" ]]; then
+  "$PYTHON_BIN" -c '
+import inspect
+import fla_npu
+from fla_npu.ops.ascendc import _stable
+
+source = inspect.getsource(_stable.npu_recurrent_kda)
+assert "initial_state.detach().clone()" in source, (
+    f"installed wheel at {fla_npu.__file__} predates the recurrent_kda "
+    "non-inplace scratch-state fix"
+)
+print("[A6-CAMODEL] installed fla_npu", fla_npu.__version__, fla_npu.__file__)
+print("[A6-CAMODEL] stable source", _stable.__file__)
+' || die "installed wheel is stale; rebuild and reinstall the a6 wheel"
 fi
 
 "$PYTHON_BIN" -c 'import torch, torch_npu; print("[A6-CAMODEL] torch", torch.__version__, "torch_npu", torch_npu.__version__)'

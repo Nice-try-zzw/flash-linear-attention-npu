@@ -69,6 +69,12 @@ class Case:
 CASES: tuple[Case, ...] = (
     Case("smoke_bsnd_fp32", ("smoke", "core", "full")),
     Case(
+        "smoke_bsnd_fp32_inplace",
+        ("core", "full"),
+        output_final_state=True,
+        inplace=True,
+    ),
+    Case(
         "dense_no_cu",
         ("core", "full"),
         batch=2,
@@ -656,7 +662,9 @@ def _print_metrics(result: dict[str, Any]) -> None:
         print(
             f"  [{status}] {item['name']}: cosine={item['cosine']:.9f} "
             f"rel_l2={item['relative_l2']:.6e} max_abs={item['max_abs']:.6e} "
-            f"matched={item['matched_ratio']:.6f} max_idx={item['max_index']}"
+            f"matched={item['matched_ratio']:.6f} "
+            f"norms={item['actual_norm']:.6e}/{item['expected_norm']:.6e} "
+            f"max_idx={item['max_index']}"
         )
     print(
         f"  mutation_contract={'PASS' if result['mutation_contract_ok'] else 'FAIL'} "
@@ -762,6 +770,8 @@ def main() -> int:
             "sim_dir": os.getenv("FLA_NPU_CAMODEL_SIM_DIR"),
             "shim": os.getenv("FLA_NPU_CAMODEL_SHIM"),
         },
+        "fla_npu": _package_provenance(),
+        "backend": _backend_provenance(),
         "criteria": {
             "cosine_min": 0.999,
             "relative_l2_max": 0.01,
@@ -782,6 +792,26 @@ def main() -> int:
         args.json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"JSON={args.json.resolve()}")
     return 0 if summary["passed"] else 1
+
+
+def _package_provenance() -> dict[str, Any]:
+    import fla_npu
+
+    return {
+        "version": getattr(fla_npu, "__version__", "unknown"),
+        "file": getattr(fla_npu, "__file__", None),
+        "stable_abi_env": os.getenv("FLA_NPU_STABLE_ABI"),
+    }
+
+
+def _backend_provenance() -> dict[str, Any]:
+    from fla_npu.ops import ascendc
+
+    name = "npu_recurrent_kda"
+    return {
+        "selected": ascendc.BACKENDS.get(name),
+        "fallbacks": ascendc.FALLBACKS.get(name, 0),
+    }
 
 
 if __name__ == "__main__":
