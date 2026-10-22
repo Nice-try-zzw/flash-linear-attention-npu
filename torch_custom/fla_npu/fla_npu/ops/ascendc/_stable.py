@@ -614,13 +614,28 @@ def npu_recurrent_kda(
         # is also what keeps the mutation contract honest: the caller's tensor is
         # genuinely not written, and the dispatch layer's MUTATION_FLAGS entry
         # already skips the version bump for this case.
-        if initial_state is None:
-            raise RuntimeError(
-                "npu_recurrent_kda: inplace_final_state=False requires "
-                "initial_state (no shape to build the scratch from)")
         import torch
 
-        scratch = torch.empty_like(initial_state)
+        if initial_state is None:
+            seq_num = (
+                int(cu_seqlens.shape[0]) - 1
+                if cu_seqlens is not None
+                else (int(q.shape[0]) if str(layout).upper() == "BSND" else 1)
+            )
+            value_heads, value_dim = int(v.shape[-2]), int(v.shape[-1])
+            key_dim = int(q.shape[-1])
+            state_tail = (
+                (value_heads, value_dim, key_dim)
+                if bool(state_v_first)
+                else (value_heads, key_dim, value_dim)
+            )
+            scratch = torch.zeros(
+                (seq_num, *state_tail), dtype=torch.float32, device=q.device)
+        else:
+            # The kernel updates the state in place. The scratch must start from
+            # the caller's state, not from uninitialised memory: otherwise output
+            # and final_state are computed as if initial_state were zero.
+            scratch = initial_state.detach().clone()
         out, _ = npu_recurrent_kda(
             q, k, v, g, beta, scratch, cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices, A_log=A_log, dt_bias=dt_bias,
