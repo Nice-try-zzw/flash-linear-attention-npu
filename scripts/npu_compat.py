@@ -7,7 +7,7 @@ Single source of truth shared by:
   advisory RuntimeWarnings for below-minimum versions and never blocks import)
 
 Keep the public promise aligned with the README and the wheel metadata: CANN
->= 8.5.2 (a2/a3) or >= 9.0.0 (a5), torch >= 2.7.1, torch_npu >=
+>= 8.5.2 (a2/a3), >= 9.0.0 (a5) or >= 9.2.0 (a6), torch >= 2.7.1, torch_npu >=
 TORCH_NPU_GDN_FIX_MINIMUMS[torch], triton-ascend >= 3.2.1 on CANN 9.x
 (9.0.0+).
 """

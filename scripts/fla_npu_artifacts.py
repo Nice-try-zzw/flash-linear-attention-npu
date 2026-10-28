@@ -144,7 +144,7 @@ def get_distribution_name() -> str:
 
     A wheel carries a prebuilt OPP for exactly one SoC, and pip cannot pick a
     chip-specific payload out of one project name, so each product tier is its
-    own project (flash-linear-attention-npu-a2/a3/a5, derived from FLA_NPU_SOC).
+    own project (flash-linear-attention-npu-a2/a3/a5/a6, derived from FLA_NPU_SOC).
     Local, GitHub Release and PyPI artifacts all carry that name.
 
     One name everywhere is the point: a locally built wheel and the published

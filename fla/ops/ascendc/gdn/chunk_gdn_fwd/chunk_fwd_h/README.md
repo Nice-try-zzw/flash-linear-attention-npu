@@ -35,8 +35,9 @@ h, v_new, final_state = chunk_fwd_h(
 
 - A2/A3/A5。
 - A6（CANN soc 短名 `ascend960dt`，soc_version `Ascend960DT_968B7`，`dav-920r1`，编译宏 `__NPU_ARCH__ == 9201`）：
-  首版只接入编译路径，kernel 复用 A5（arch35）实现；精度与性能待 A6 环境补充，A6 专用分支
-  （`CATLASS_ARCH == 9201`）暂未接入。
+  复用 arch35 kernel 实现，并按 A6 的 1 AIC : 1 AIV 拓扑串行处理每轮全部 head；Catlass 固定使用
+  `yjp-hw/catlass-GDN_KDA` 的 `61dbd2f440e1d61e018c81161b4398023cae05a7`。当前完成编译路径接入，
+  精度与性能待 A6 环境补充。
 
 ## 计算语义
 
