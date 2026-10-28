@@ -29,7 +29,11 @@ constexpr uint32_t FWD_H_CHUNK = 64;
 constexpr uint32_t FWD_H_K = 128;
 constexpr uint32_t FWD_H_V = 128;
 constexpr uint32_t FWD_H_AIC_HEAD_SLOTS = 4;
-constexpr uint32_t FWD_H_AIV_COUNT = 2;
+#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
+constexpr uint32_t FWD_H_AIV_COUNT = 1;   // A6: 1 AIC : 1 AIV
+#else
+constexpr uint32_t FWD_H_AIV_COUNT = 2;   // A5: 1 AIC : 2 AIV
+#endif
 constexpr uint32_t FWD_H_AIV_HEAD_SLOTS = 2;
 constexpr uint32_t FWD_H_FLAG_SUBBLOCK_STRIDE = 16;
 
@@ -202,7 +206,12 @@ __aicore__ inline uint32_t FwdHLocalSlotBase(uint32_t localSlot)
 
 __aicore__ inline uint32_t FwdHAivHeadCount(uint32_t activeHeadCount, uint32_t aiv)
 {
+#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
+    (void)aiv;
+    return activeHeadCount;   // 1:1 单 AIV 处理全部 head
+#else
     return activeHeadCount > aiv ? (activeHeadCount - aiv + 1) / 2 : 0;
+#endif
 }
 
 __aicore__ inline uint32_t FwdHMode2PairCount(uint32_t activeHeadCount)
