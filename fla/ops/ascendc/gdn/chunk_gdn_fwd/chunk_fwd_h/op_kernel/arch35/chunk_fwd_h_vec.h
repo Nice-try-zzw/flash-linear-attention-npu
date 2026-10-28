@@ -411,17 +411,6 @@ private:
         return UbAt<uint8_t>(slot * FWD_H_UB_LOCAL_SLOT_BYTES);
     }
 
-    // 1:1 单 AIV 串行处理全部 head；2-AIV 保持 aiv_ + 2*coreHeadId 分工。
-    __aicore__ inline const FwdHHeadBinding &LocalHead(
-        const FwdHHeadRoundPlan &plan, uint32_t coreHeadId) const
-    {
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
-        return plan.heads[coreHeadId];
-#else
-        return plan.heads[aiv_ + 2 * coreHeadId];
-#endif
-    }
-
     __aicore__ inline AscendC::LocalTensor<bfloat16_t> RightSlot(uint32_t slot)
     {
         return UbAt<bfloat16_t>(slot * FWD_H_UB_LOCAL_SLOT_BYTES + FWD_H_TOKEN_MATRIX_FP32_BYTES);
@@ -623,16 +612,16 @@ private:
         }
         const uint32_t localHeads = FwdHAivHeadCount(unit.headRound.activeHeadCount, aiv_);
         for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-            const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+            const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
             PrefetchSMinusOneHead(unit, head);
             if (coreHeadId > 0) {
                 ConsumeSMinusOneHead(
-                    unit, LocalHead(unit.headRound, coreHeadId - 1));
+                    unit, unit.headRound.heads[aiv_ + 2 * (coreHeadId - 1)]);
             }
         }
         if (localHeads > 0) {
             ConsumeSMinusOneHead(
-                unit, LocalHead(unit.headRound, localHeads - 1));
+                unit, unit.headRound.heads[aiv_ + 2 * (localHeads - 1)]);
         }
         // S-1 与主循环复用 [0,192) KiB。先 drain 全部 active bank，再统一发布 H ready。
         for (uint32_t slot = 0; slot < localHeads; ++slot) {
@@ -640,7 +629,7 @@ private:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(IoFreeEvent(slot));
         }
         for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-            const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+            const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
             AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
                 FwdHAivLocalFlag(FWD_H_H_READY_FLAG, head.localSlot));
         }
@@ -781,11 +770,11 @@ private:
             // U/g 使用两个独立 input bank 预取；P/D 只使用数据槽 0，并由 ready/free
             // 在两个 head 之间串行传递所有权。这样不增加 round 次数。
             for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-                const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+                const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
                 PrefetchStage1Inputs(unit, chunk, head, coreHeadId, writeRight);
             }
             for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-                const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+                const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
                 AcquireStage1LocalSlot(head);
                 DispatchStage1<true>(unit, chunk, head, coreHeadId,
                                      hasP, writeRight, zeroState);
@@ -795,14 +784,14 @@ private:
                 // 再按逻辑 slot 发布原有 ready，防止首个 D 提前覆盖第二个 right。
                 for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
                     const FwdHHeadBinding &head =
-                        LocalHead(unit.headRound, coreHeadId);
+                        unit.headRound.heads[aiv_ + 2 * coreHeadId];
                     AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
                         FwdHAivLocalFlag(FWD_H_RIGHT_READY_FLAG, head.localSlot));
                 }
             }
         } else {
             for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-                const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+                const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
                 const uint32_t slot = DataSlot(head);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(IoFreeEvent(slot));
                 AscendC::GlobalTensor<bfloat16_t> u;
@@ -825,13 +814,13 @@ private:
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(IoReadyEvent(slot));
                 if (coreHeadId > 0) {
                     const FwdHHeadBinding &previous =
-                        LocalHead(unit.headRound, coreHeadId - 1);
+                        unit.headRound.heads[aiv_ + 2 * (coreHeadId - 1)];
                     DispatchStage1<false>(unit, chunk, previous, DataSlot(previous),
                                           hasP, writeRight, zeroState);
                 }
             }
             if (localHeads > 0) {
-                const FwdHHeadBinding &last = LocalHead(unit.headRound, localHeads - 1);
+                const FwdHHeadBinding &last = unit.headRound.heads[aiv_ + 2 * (localHeads - 1)];
                 DispatchStage1<false>(unit, chunk, last, DataSlot(last),
                                       hasP, writeRight, zeroState);
             }
@@ -1000,7 +989,7 @@ private:
             }
         }
         for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-            const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+            const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
             const uint32_t slot = DataSlot(head);
             // externalGateSlot==FWD_H_AIV_HEAD_SLOTS 表示按逻辑 head slot 选择双 gate bank；
             // 单 head chunk 流水仍直接传入 chunk 奇偶 bank。
@@ -1124,7 +1113,7 @@ private:
         if (localHeads == 0) {
             return;
         }
-        const FwdHHeadBinding &head = LocalHead(unit.headRound, 0);
+        const FwdHHeadBinding &head = unit.headRound.heads[aiv_];
         const FwdHChunkSpan first = FwdHBuildChunk(unit.sequence, 0);
         const bool firstWriteRight = NeedsStage3(first);
         PrefetchStage1Inputs(unit, first, head, 0, firstWriteRight);
@@ -1172,7 +1161,7 @@ private:
                     if (chunkId > 0) {
                         for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
                             const FwdHHeadBinding &head =
-                                LocalHead(unit.headRound, coreHeadId);
+                                unit.headRound.heads[aiv_ + 2 * coreHeadId];
                             AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                                 FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, head.localSlot));
                         }
@@ -1189,7 +1178,7 @@ private:
                 if (chunkId > 0) {
                     for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
                         const FwdHHeadBinding &head =
-                            LocalHead(unit.headRound, coreHeadId);
+                            unit.headRound.heads[aiv_ + 2 * coreHeadId];
                         AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                             FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, head.localSlot));
                     }
@@ -1203,7 +1192,7 @@ private:
         const bool lastHasStage2 = args_.tiling.storeFinalState != 0;
         if (lastHasStage2) {
             for (uint32_t coreHeadId = 0; coreHeadId < localHeads; ++coreHeadId) {
-                const FwdHHeadBinding &head = LocalHead(unit.headRound, coreHeadId);
+                const FwdHHeadBinding &head = unit.headRound.heads[aiv_ + 2 * coreHeadId];
                 AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                     FwdHAivLocalFlag(FWD_H_RIGHT_FREE_FLAG, head.localSlot));
             }

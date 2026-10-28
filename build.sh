@@ -567,11 +567,16 @@ function build_example()
         return 1
     fi
     # Obtain the example file corresponding to the input soc unit.
-    if [[ "$ASCEND_SOC_UNITS" == "ascend950" || "$ASCEND_SOC_UNITS" == "ascend960dt" ]]; then
-        # 1. ascend950 / ascend960dt example is independent of other soc units（共用 arch35 目录）.
+    if [[ "$ASCEND_SOC_UNITS" == "ascend950" ]]; then
+        # 1. ascend950 example is independent of other soc units.
         files=($(find ../ -path "*/${EXAMPLE_NAME}/examples/arch35/${pattern}*.cpp"))
         if [[ -z "$files" ]]; then
-            # 2. Example is shared with other soc units, or the current operator only supports ascend950/ascend950.
+            # 2. Example is shared with other soc units.
+            files=($(find ../ -path "*/${EXAMPLE_NAME}/examples/${pattern}*.cpp"))
+        fi
+    elif [[ "$ASCEND_SOC_UNITS" == "ascend960dt" ]]; then
+        files=($(find ../ -path "*/${EXAMPLE_NAME}/examples/arch92/${pattern}*.cpp"))
+        if [[ -z "$files" ]]; then
             files=($(find ../ -path "*/${EXAMPLE_NAME}/examples/${pattern}*.cpp"))
         fi
     else

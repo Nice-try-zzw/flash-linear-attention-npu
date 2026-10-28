@@ -7,12 +7,13 @@
 #include "chunk_fwd_h_tiling_key.h"
 #include "chunk_fwd_h_policy.h"
 
-// A5（dav-c310，__CCE_AICORE__ == 310）与 A6（Ascend960DT，__NPU_ARCH__ == 9201）
-// 共用 arch35 实现：A6 首版复用 A5 的 kernel 实现，先打通编译路径。
-#if (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310) || \
-    (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
+// A5（dav-c310）使用 arch35，A6（dav-920r1）使用独立的 arch92 实现。
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/chunk_fwd_h_cube.h"
 #include "arch35/chunk_fwd_h_vec.h"
+#elif defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+#include "arch92/chunk_fwd_h_cube.h"
+#include "arch92/chunk_fwd_h_vec.h"
 #else
 #include "arch22/chunk_fwd_h_cube.h"
 #include "arch22/chunk_fwd_h_vec.h"
@@ -55,9 +56,10 @@ __aicore__ inline void RunFwdHTyped(const FwdHKernelArgs &args)
         if (!hasCubeWork) {
             return;
         }
-#if (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310) || \
-    (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         ChunkFwdHCubeArch35<CompilePolicy, STATE_V_FIRST> cube;
+#elif defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+        ChunkFwdHCubeArch92<CompilePolicy, STATE_V_FIRST> cube;
 #else
         AscendC::TPipe pipe;
         ChunkFwdHCubeArch22<CompilePolicy, STATE_V_FIRST> cube;
@@ -66,9 +68,11 @@ __aicore__ inline void RunFwdHTyped(const FwdHKernelArgs &args)
         cube.Process();
     }
     if ASCEND_IS_AIV {
-#if (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310) || \
-    (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         ChunkFwdHVecArch35<GateT, CompilePolicy, STATE_V_FIRST> vec;
+        vec.Init(args);
+#elif defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+        ChunkFwdHVecArch92<GateT, CompilePolicy, STATE_V_FIRST> vec;
         vec.Init(args);
 #else
         AscendC::TPipe pipe;

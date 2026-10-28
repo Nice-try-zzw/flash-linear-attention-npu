@@ -774,14 +774,6 @@ private:
         }
         if (hasNextWorkUnit) {
             // PIPE_S 将 round 握手放到控制流水，阻止下一轮 MTE2 预取越过 DONE/ACK。
-            // 1:1 (A6) 只与唯一 AIV0 握手；2-AIV (A5) 与 AIV0/AIV1 双向握手。
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201)
-            AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(
-                FwdHAicPeerFlag(FWD_H_ROUND_DONE_FLAG, 0, 0));
-            // ACK 表示 AIC 已完成本轮消费；AIV 收到后才可复用下一轮的本地槽。
-            AscendC::CrossCoreSetFlag<0x4, PIPE_S>(
-                FwdHAicPeerFlag(FWD_H_ROUND_ACK_FLAG, 0, 0));
-#else
             AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(
                 FwdHAicPeerFlag(FWD_H_ROUND_DONE_FLAG, 0, 0));
             AscendC::CrossCoreWaitFlag<0x4, PIPE_S>(
@@ -791,7 +783,6 @@ private:
                 FwdHAicPeerFlag(FWD_H_ROUND_ACK_FLAG, 0, 0));
             AscendC::CrossCoreSetFlag<0x4, PIPE_S>(
                 FwdHAicPeerFlag(FWD_H_ROUND_ACK_FLAG, 0, 1));
-#endif
         }
     }
 
