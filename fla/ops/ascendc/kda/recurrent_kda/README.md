@@ -82,10 +82,11 @@ o_t = S @ (q_t * scale)
 - `A_log/dt_bias` 支持 `FP32`。
 - `cu_seqlens` 为必传、与 q 同设备的 INT32/INT64 Tensor；offset 必须单调不减，末项不得超过输入
   token capacity。A2/A3 支持超过 8 token 的 dense 单序列与 varlen 分段，内部按 8-token 窗口递推；
-  A5 每段序列长度仍必须小于等于 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
+  A5/A6 每段序列长度仍必须小于等于 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
   更新有定义，padding tail 输出不作保证。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
 - 支持 V-first `[state_capacity,HV,V,K]` 和 K-first `[state_capacity,HV,K,V]`，state dtype 为
   FP32/BF16。非连续 state 仅允许 slot/head 外层维存在间隔；最后两维必须为行主序稠密矩阵且各
   slot/head 的地址区间不得重叠。底层 aclnn 接口要求显式传入 state。
 - `HV` 必须能被 `H` 整除；`H/HV <= 256`；`K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
+- SoC 支持 A2/A3/A5 以及 A6 `ascend960dt`；A6 使用独立 `arch92` 入口和 regbase AIV 实现。

@@ -11,8 +11,12 @@
  * \file recurrent_kda.cpp
  * \brief
  */
+// A5 uses arch35; A6 (Ascend960DT) uses its dedicated arch92 entry. Both
+// resolve to the same AIV-only regbase implementation.
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/recurrent_kda.h"
+#elif defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+#include "arch92/recurrent_kda.h"
 #else
 #include "recurrent_kda.h"
 #endif
