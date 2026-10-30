@@ -38,6 +38,11 @@ constexpr uint16_t TWO_V_LENGTH = 2 * V_LENGTH;
 constexpr uint64_t INVALID_STATE_SLOT = static_cast<uint64_t>(-1);
 constexpr uint32_t STATE_TRANSPOSE_BLOCK = 16;
 constexpr uint32_t DATA_BLOCK_BYTES = 32;
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+// A6 can issue three independent SIMD instructions per cycle. Three V rows
+// provide independent dataflow without crossing the token recurrence boundary.
+constexpr uint16_t A6_TRIPLE_ISSUE_ROWS = 3;
+#endif
 
 #ifndef RKDA_ENABLE_ADD_FOLD_REDUCE
 #define RKDA_ENABLE_ADD_FOLD_REDUCE  1
@@ -779,11 +784,111 @@ private:
         }
     }
 
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+    __aicore__ inline void DecayMatVecReduce128A6(LocalTensor<float> &stateTensor,
+                                                  const LocalTensor<float> &gateTensor,
+                                                  const LocalTensor<float> &vecTensor,
+                                                  LocalTensor<float> &dstTensor, uint32_t rows)
+    {
+        __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
+        __ubuf__ float *gateAddr = (__ubuf__ float *)gateTensor.GetPhyAddr();
+        __ubuf__ float *vecAddr = (__ubuf__ float *)vecTensor.GetPhyAddr();
+        __ubuf__ float *dstAddr = (__ubuf__ float *)dstTensor.GetPhyAddr();
+        uint16_t rowNum = static_cast<uint16_t>(rows);
+        uint16_t rowGroupNum = rowNum / A6_TRIPLE_ISSUE_ROWS;
+        uint16_t tailRowOffset = rowGroupNum * A6_TRIPLE_ISSUE_ROWS;
+        uint16_t tailRowNum = rowNum - tailRowOffset;
+        __VEC_SCOPE__
+        {
+            RegTensor<float> gate0;
+            RegTensor<float> gate1;
+            RegTensor<float> vec0;
+            RegTensor<float> vec1;
+            RegTensor<float> state00;
+            RegTensor<float> state01;
+            RegTensor<float> state10;
+            RegTensor<float> state11;
+            RegTensor<float> state20;
+            RegTensor<float> state21;
+            RegTensor<float> product00;
+            RegTensor<float> product01;
+            RegTensor<float> product10;
+            RegTensor<float> product11;
+            RegTensor<float> product20;
+            RegTensor<float> product21;
+            RegTensor<float> sum0;
+            RegTensor<float> sum1;
+            RegTensor<float> sum2;
+            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(gate0, gate1, gateAddr);
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(vec0, vec1, vecAddr);
+            for (uint16_t groupIdx = 0; groupIdx < rowGroupNum; ++groupIdx) {
+                uint16_t row = groupIdx * A6_TRIPLE_ISSUE_ROWS;
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state00, state01, stateAddr + row * alignK_);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state10, state11, stateAddr + (row + 1) * alignK_);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state20, state21, stateAddr + (row + 2) * alignK_);
+
+                // Keep three independent row chains adjacent so A6 can fill all
+                // three issue slots. Arithmetic order within each row is unchanged.
+                Mul(state00, state00, gate0, pregFull);
+                Mul(state10, state10, gate0, pregFull);
+                Mul(state20, state20, gate0, pregFull);
+                Mul(state01, state01, gate1, pregFull);
+                Mul(state11, state11, gate1, pregFull);
+                Mul(state21, state21, gate1, pregFull);
+
+                Mul(product00, state00, vec0, pregFull);
+                Mul(product10, state10, vec0, pregFull);
+                Mul(product20, state20, vec0, pregFull);
+                Mul(product01, state01, vec1, pregFull);
+                Mul(product11, state11, vec1, pregFull);
+                Mul(product21, state21, vec1, pregFull);
+                Add(product00, product00, product01, pregFull);
+                Add(product10, product10, product11, pregFull);
+                Add(product20, product20, product21, pregFull);
+                ReduceSum(sum0, product00, pregFull);
+                ReduceSum(sum1, product10, pregFull);
+                ReduceSum(sum2, product20, pregFull);
+
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + row * alignK_, state00, state01, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + (row + 1) * alignK_, state10, state11, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + (row + 2) * alignK_, state20, state21, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + row, sum0, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + row + 1, sum1, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + row + 2, sum2, pregFull);
+            }
+            for (uint16_t tailIdx = 0; tailIdx < tailRowNum; ++tailIdx) {
+                uint16_t row = tailRowOffset + tailIdx;
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state00, state01, stateAddr + row * alignK_);
+                Mul(state00, state00, gate0, pregFull);
+                Mul(state01, state01, gate1, pregFull);
+                Mul(product00, state00, vec0, pregFull);
+                Mul(product01, state01, vec1, pregFull);
+                Add(product00, product00, product01, pregFull);
+                ReduceSum(sum0, product00, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + row * alignK_, state00, state01, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + row, sum0, pregFull);
+            }
+        }
+    }
+#endif
+
     __aicore__ inline void DecayMatVecReduce128(LocalTensor<float> &stateTensor,
                                                 const LocalTensor<float> &gateTensor,
                                                 const LocalTensor<float> &vecTensor,
                                                 LocalTensor<float> &dstTensor, uint32_t rows)
     {
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+        DecayMatVecReduce128A6(stateTensor, gateTensor, vecTensor, dstTensor, rows);
+#else
         __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
         __ubuf__ float *gateAddr = (__ubuf__ float *)gateTensor.GetPhyAddr();
         __ubuf__ float *vecAddr = (__ubuf__ float *)vecTensor.GetPhyAddr();
@@ -816,6 +921,7 @@ private:
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
             }
         }
+#endif
     }
 
     __aicore__ inline void ProcessKQ(const LocalTensor<float> &cubeTensor, const LocalTensor<float> &vec1Tensor,
@@ -856,6 +962,158 @@ private:
         }
     }
 
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+    template <bool useSigmoid, bool allowNeg>
+    __aicore__ inline void ProcessDeltaKQReduce128A6(const LocalTensor<float> &dotTensor,
+                                                     const LocalTensor<float> &vTensor,
+                                                     const LocalTensor<float> &betaTensor,
+                                                     uint64_t betaOffset,
+                                                     const LocalTensor<float> &kTensor,
+                                                     LocalTensor<float> &stateTensor,
+                                                     const LocalTensor<float> &qTensor,
+                                                     LocalTensor<float> &attnTensor, uint32_t rows)
+    {
+        __ubuf__ float *dotAddr = (__ubuf__ float *)dotTensor.GetPhyAddr();
+        __ubuf__ float *vAddr = (__ubuf__ float *)vTensor.GetPhyAddr();
+        uint64_t betaRowStride =
+            betaDtype_ == 0 ? FP32_NUM_PER_BLOCK : BF16_NUM_PER_BLOCK;
+        __ubuf__ float *betaAddr = (__ubuf__ float *)betaTensor.GetPhyAddr() + betaOffset * betaRowStride;
+        __ubuf__ float *kAddr = (__ubuf__ float *)kTensor.GetPhyAddr();
+        __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
+        __ubuf__ float *qAddr = (__ubuf__ float *)qTensor.GetPhyAddr();
+        __ubuf__ float *attnAddr = (__ubuf__ float *)attnTensor.GetPhyAddr();
+        uint16_t rowNum = static_cast<uint16_t>(rows);
+        uint16_t rowGroupNum = rowNum / A6_TRIPLE_ISSUE_ROWS;
+        uint16_t tailRowOffset = rowGroupNum * A6_TRIPLE_ISSUE_ROWS;
+        uint16_t tailRowNum = rowNum - tailRowOffset;
+        __VEC_SCOPE__
+        {
+            RegTensor<float> beta;
+            RegTensor<float> k0;
+            RegTensor<float> k1;
+            RegTensor<float> q0;
+            RegTensor<float> q1;
+            RegTensor<float> one;
+            RegTensor<float> delta0;
+            RegTensor<float> delta1;
+            RegTensor<float> delta2;
+            RegTensor<float> value0;
+            RegTensor<float> value1;
+            RegTensor<float> value2;
+            RegTensor<float> state00;
+            RegTensor<float> state01;
+            RegTensor<float> state10;
+            RegTensor<float> state11;
+            RegTensor<float> state20;
+            RegTensor<float> state21;
+            RegTensor<float> dot00;
+            RegTensor<float> dot01;
+            RegTensor<float> dot10;
+            RegTensor<float> dot11;
+            RegTensor<float> dot20;
+            RegTensor<float> dot21;
+            RegTensor<float> sum0;
+            RegTensor<float> sum1;
+            RegTensor<float> sum2;
+            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
+            DataCopy<float, LoadDist::DIST_BRC_B32>(beta, betaAddr);
+            if constexpr (useSigmoid) {
+                Muls(beta, beta, -1.0f, pregFull);
+                Exp(beta, beta, pregFull);
+                Adds(beta, beta, 1.0f, pregFull);
+                Duplicate(one, 1.0f);
+                Div(beta, one, beta, pregFull);
+                if constexpr (allowNeg) {
+                    Muls(beta, beta, 2.0f, pregFull);
+                }
+            }
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(k0, k1, kAddr);
+            DataCopy<float, LoadDist::DIST_DINTLV_B32>(q0, q1, qAddr);
+            for (uint16_t groupIdx = 0; groupIdx < rowGroupNum; ++groupIdx) {
+                uint16_t row = groupIdx * A6_TRIPLE_ISSUE_ROWS;
+                DataCopy<float, LoadDist::DIST_BRC_B32>(delta0, dotAddr + row);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(delta1, dotAddr + row + 1);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(delta2, dotAddr + row + 2);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(value0, vAddr + row);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(value1, vAddr + row + 1);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(value2, vAddr + row + 2);
+
+                Sub(delta0, value0, delta0, pregFull);
+                Sub(delta1, value1, delta1, pregFull);
+                Sub(delta2, value2, delta2, pregFull);
+                Mul(delta0, delta0, beta, pregFull);
+                Mul(delta1, delta1, beta, pregFull);
+                Mul(delta2, delta2, beta, pregFull);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state00, state01, stateAddr + row * alignK_);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state10, state11, stateAddr + (row + 1) * alignK_);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state20, state21, stateAddr + (row + 2) * alignK_);
+
+                // Three independent update and output chains are interleaved.
+                // valueN is scratch after Sub and is reused for the k update.
+                Mul(value0, delta0, k0, pregFull);
+                Mul(value1, delta1, k0, pregFull);
+                Mul(value2, delta2, k0, pregFull);
+                Add(state00, state00, value0, pregFull);
+                Add(state10, state10, value1, pregFull);
+                Add(state20, state20, value2, pregFull);
+                Mul(dot00, state00, q0, pregFull);
+                Mul(dot10, state10, q0, pregFull);
+                Mul(dot20, state20, q0, pregFull);
+
+                Mul(value0, delta0, k1, pregFull);
+                Mul(value1, delta1, k1, pregFull);
+                Mul(value2, delta2, k1, pregFull);
+                Add(state01, state01, value0, pregFull);
+                Add(state11, state11, value1, pregFull);
+                Add(state21, state21, value2, pregFull);
+                Mul(dot01, state01, q1, pregFull);
+                Mul(dot11, state11, q1, pregFull);
+                Mul(dot21, state21, q1, pregFull);
+
+                Add(dot00, dot00, dot01, pregFull);
+                Add(dot10, dot10, dot11, pregFull);
+                Add(dot20, dot20, dot21, pregFull);
+                ReduceSum(sum0, dot00, pregFull);
+                ReduceSum(sum1, dot10, pregFull);
+                ReduceSum(sum2, dot20, pregFull);
+
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + row * alignK_, state00, state01, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + (row + 1) * alignK_, state10, state11, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + (row + 2) * alignK_, state20, state21, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row, sum0, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row + 1, sum1, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row + 2, sum2, pregFull);
+            }
+            for (uint16_t tailIdx = 0; tailIdx < tailRowNum; ++tailIdx) {
+                uint16_t row = tailRowOffset + tailIdx;
+                DataCopy<float, LoadDist::DIST_BRC_B32>(delta0, dotAddr + row);
+                DataCopy<float, LoadDist::DIST_BRC_B32>(value0, vAddr + row);
+                Sub(delta0, value0, delta0, pregFull);
+                Mul(delta0, delta0, beta, pregFull);
+                DataCopy<float, LoadDist::DIST_DINTLV_B32>(
+                    state00, state01, stateAddr + row * alignK_);
+                Mul(value0, delta0, k0, pregFull);
+                Add(state00, state00, value0, pregFull);
+                Mul(dot00, state00, q0, pregFull);
+                Mul(value0, delta0, k1, pregFull);
+                Add(state01, state01, value0, pregFull);
+                Mul(dot01, state01, q1, pregFull);
+                Add(dot00, dot00, dot01, pregFull);
+                ReduceSum(sum0, dot00, pregFull);
+                DataCopy<float, StoreDist::DIST_INTLV_B32>(
+                    stateAddr + row * alignK_, state00, state01, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row, sum0, pregFull);
+            }
+        }
+    }
+#endif
+
     template <bool useSigmoid, bool allowNeg>
     __aicore__ inline void ProcessDeltaKQReduce128(const LocalTensor<float> &dotTensor,
                                                    const LocalTensor<float> &vTensor,
@@ -866,6 +1124,11 @@ private:
                                                    const LocalTensor<float> &qTensor,
                                                    LocalTensor<float> &attnTensor, uint32_t rows)
     {
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
+        ProcessDeltaKQReduce128A6<useSigmoid, allowNeg>(
+            dotTensor, vTensor, betaTensor, betaOffset, kTensor,
+            stateTensor, qTensor, attnTensor, rows);
+#else
         __ubuf__ float *dotAddr = (__ubuf__ float *)dotTensor.GetPhyAddr();
         __ubuf__ float *vAddr = (__ubuf__ float *)vTensor.GetPhyAddr();
         uint64_t betaRowStride =
@@ -927,6 +1190,7 @@ private:
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + i, sum, pregFull);
             }
         }
+#endif
     }
 
     __aicore__ inline void ProcessDeltaKQReduce128Dispatch(const LocalTensor<float> &dotTensor,

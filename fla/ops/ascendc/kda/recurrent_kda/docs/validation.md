@@ -88,3 +88,60 @@ Pending in an A6 build environment:
 - kernel compilation with CANN 9.2.0 and the A6 toolchain;
 - camodel/real-device accuracy and determinism;
 - A6 performance profiling.
+
+## A6 triple-issue optimization attempt
+
+### Change under test
+
+- Scope: `K=128` A6 RegBase paths only.
+- Hot paths: `DecayMatVecReduce128A6` and `ProcessDeltaKQReduce128A6`.
+- Scheduling change: process three independent V rows per group so the A6
+  three-issue scheduler receives three independent multiply/update/reduce
+  chains.
+- Invariants: token order, per-row FP32 arithmetic order, reduction order,
+  UB layout, workspace and synchronization are unchanged.
+- Fallback: A5/A2/A3 use the original single-row loops; groups with fewer than
+  three remaining V rows use the original single-row tail chain.
+
+### Completed offline checks
+
+```bash
+python -m unittest tests.test_recurrent_kda_a6_sources tests.test_stable_recurrent_kda
+git diff --check
+```
+
+Result: 7 tests passed; no whitespace errors. The Bash harness also passes
+`bash -n`.
+
+### Required A6 accuracy and performance verification
+
+After installing an A6 build containing this change, run:
+
+```bash
+bash tests/atk/run_test_cpu.sh \
+  -op=recurrent_kda \
+  -soc=ascend960dt \
+  -npu_device_id=0 \
+  -scope=accuracy
+
+bash tests/atk/run_test_cpu.sh \
+  -op=recurrent_kda \
+  -soc=ascend960dt \
+  -npu_device_id=0 \
+  -scope=determinism
+```
+
+Performance comparison must use the same confirmed A6 case against the
+`A6-dev-recurrent_kda` baseline and this branch. Profile both builds with:
+
+```bash
+msprof \
+  --application="bash tests/atk/run_test_cpu.sh -op=recurrent_kda -soc=ascend960dt -npu_device_id=0 -scope=performance" \
+  --output=<new-output-directory>
+```
+
+Use the median `Task Duration(us)` for the `recurrent_kda` kernel from
+`op_summary`, with at least five repeated runs per build. Also compare
+`SIMD_ExecIPC`, `dcache_refill_count` and scalar `load_store_ratio`. No
+performance result is claimed in this branch because no A6 toolchain or model
+case was available in the current environment.

@@ -34,6 +34,31 @@ class RecurrentKdaA6SourceTest(unittest.TestCase):
         self.assertIn('STREQUAL "ascend960dt"', cmake)
         self.assertIn("--cce-no-dcache-flush", cmake)
 
+    def test_a6_k128_hot_paths_expose_three_row_ilp(self) -> None:
+        source = (
+            OP_ROOT / "op_kernel" / "recurrent_kda_regbase.h"
+        ).read_text(encoding="utf-8")
+        self.assertIn("A6_TRIPLE_ISSUE_ROWS = 3", source)
+        self.assertIn("DecayMatVecReduce128A6", source)
+        self.assertIn("ProcessDeltaKQReduce128A6", source)
+        self.assertRegex(
+            source,
+            r"#if defined\(__NPU_ARCH__\) && __NPU_ARCH__ == 9201"
+            r"\s+DecayMatVecReduce128A6",
+        )
+        self.assertRegex(
+            source,
+            r"#if defined\(__NPU_ARCH__\) && __NPU_ARCH__ == 9201"
+            r"\s+ProcessDeltaKQReduce128A6",
+        )
+
+    def test_atk_harness_accepts_a6_soc(self) -> None:
+        script = (REPO_ROOT / "tests" / "atk" / "run_test_cpu.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("a6|A6|ascend960dt) SOC=\"ascend960dt\"", script)
+        self.assertIn("*960DT*|*960dt*|*Ascend960*) echo \"ascend960dt\"", script)
+
 
 if __name__ == "__main__":
     unittest.main()

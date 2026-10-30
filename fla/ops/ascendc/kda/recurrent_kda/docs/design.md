@@ -1,5 +1,7 @@
 # RecurrentKda 设计方案
 
+方案设计规则版本：`V2`
+
 ## 1. 背景
 
 KDA recurrent 用于小步长 decode/MTP 场景，按 token 顺序更新 KDA 状态并生成输出。上游常用 API 支持
@@ -176,6 +178,35 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 目标场景是 decode/MTP recurrent 小步长，主要瓶颈是状态矩阵读写和每 token 的 `S @ k`、`outer(delta,k)`、`S @ q`。
 当前实现已使用输入/输出双缓冲，并在 A5/A6 regbase 的 `K=128` 路径采用融合归约和 repeat DataCopy；后续优化仍应以
 状态搬运、向量流水和同步开销为重点。
+
+### 10.1 A6 三发射行级 ILP
+
+A6 相对 A5 增加了 SIMD 指令三发射能力。`recurrent_kda` 的 token 维存在严格的状态递推依赖，不能跨 token
+并行；但在一个 token、一个 value-head 的状态片段内，不同 V 行的
+`decay(S)`、`S @ k`、`S += outer(delta,k)` 和 `S @ q` 相互独立，可以作为三路数据流暴露给指令调度器。
+
+A6 `K=128` 热路径采用以下设计：
+
+- 仅在 `__NPU_ARCH__ == 9201` 编译分支启用，A5/A2/A3 保持原有单行循环。
+- `DecayMatVecReduce128` 和 `ProcessDeltaKQReduce128` 将 V 行按 3 行分组；每组先完成三行 load，再交错发出
+  三行的 gate 乘、matvec 乘、state 更新和输出乘链，最后分别执行原有 `ReduceSum` 和 store。
+- 每组内每行的加法、乘法和归约顺序与单行实现一致，只在行间重排指令；不同组之间及不同 token 之间仍按原顺序推进。
+- `V` 行数不能被 3 整除时保留 0、1 或 2 个 tail 行，并回到单行链处理。该 tail 路径不读取有效范围以外的数据。
+- 该实现不使用未经验证的三发射 compiler pragma，而是通过显式三路独立 `RegTensor` 数据流为编译器提供可调度 ILP。
+- `DecayMatVecReduce128A6` 峰值使用 19 个 FP32 `RegTensor`，
+  `ProcessDeltaKQReduce128A6` 峰值使用 27 个 FP32 `RegTensor`，低于当前 RegBase 经验上限 32 个。
+
+该改动不改变 AIV-only 执行模型、UB buffer 布局、workspace、同步协议或数学公式。理论收益是降低单行依赖链造成的
+发射空泡；实际收益必须在 A6 上按 10.2 的统一口径实测，当前不能把理论收益视为已验证加速比。
+
+### 10.2 A6 性能验收口径
+
+本轮未提供具体模型 case 和性能目标，因此不自行构造目标 shape。正式实验需使用用户确认的 A6 recurrent decode/MTP
+case，并固定 Q/K/V、gate/beta、state dtype、layout、序列长度、state 槽位、编译选项、运行设备、预热次数和采样次数。
+
+基线与候选分别使用 `A6-dev-recurrent_kda` 和本 perf 分支，取 `msprof` `op_summary` 中目标 kernel 的
+`Task Duration(us)` 中位数。精度必须先通过；性能至少重复 5 次，候选收益需超过同环境重复测量波动。若
+`SIMD_ExecIPC` 未提升、`dcache_refill_count` 增加或出现 `load_store_ratio >= 0.30`，则本候选应标记为回退。
 
 ## 11. 测试设计
 

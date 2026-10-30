@@ -142,7 +142,7 @@ bash tests/atk/run_test_cpu.sh -op=<op_name>
 | `-op=<op_name>`       | `tests/atk` 下的算子目录名                                                                                   |
 | `-npu_device_id=<id>` | 传给`atk node --devices` 的 NPU 设备号，默认`0`；`gen_cases` 不需要                                       |
 | `-scope=<scope>`      | 执行动作，支持`all/accuracy/performance/determinism/mssanitizer/gen_cases`                                   |
-| `-soc=<soc>`          | SOC 标识，支持`ascend910b/A2`、`ascend910_93/A3`、`ascend950/A5`；默认 `auto`，由 `npu-smi` 自动探测 |
+| `-soc=<soc>`          | SOC 标识，支持`ascend910b/A2`、`ascend910_93/A3`、`ascend950/A5`、`ascend960dt/A6`；默认 `auto`，由 `npu-smi` 自动探测 |
 
 `all` 包含 `accuracy`、`performance`、`determinism` 和 `mssanitizer`，并在运行前检查三份
 用例 JSON 均可解析且非空。`gen_cases` 不在 `all` 中，必须显式指定。
