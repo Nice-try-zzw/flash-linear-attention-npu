@@ -63,7 +63,12 @@ void RecurrentKdaTiling::InitCompileInfo()
     const auto &ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
-    compileInfo_.isA5 = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510;
+    // The arch35 and arch92 short-sequence kernels use the same regbase UB layout.
+    const auto npuArch = ascendcPlatform.GetCurNpuArch();
+    compileInfo_.isRegbase = (npuArch == NpuArch::DAV_3510 || npuArch == NpuArch::DAV_9201);
+    // A6 与 A5 共用 regbase 计算流程，但 960dt 的 vector UB 为 384KB 且支持三发射，
+    // UB 切分与 kernel 侧 VF 融合需要单独走 A6 策略。
+    compileInfo_.isA6 = (npuArch == NpuArch::DAV_9201);
 
     if (compileInfo_.aivNum <= 0) {
         OP_LOGE(context_->GetNodeName(), "aivNum <= 0");
@@ -139,7 +144,8 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     CopyOptionalOriginShape(context_, ACC_TOKEN_INDEX, ctx.acceptedTokensShape);
     ctx.aivNum = compileInfo_.aivNum;
     ctx.ubSize = compileInfo_.ubSize;
-    ctx.isA5 = compileInfo_.isA5 ? 1 : 0;
+    ctx.isRegbase = compileInfo_.isRegbase ? 1 : 0;
+    ctx.isA6 = compileInfo_.isA6 ? 1 : 0;
     ctx.stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
     ctx.gateDtype = context_->GetInputDesc(GATE_INDEX)->GetDataType();
     ctx.betaDtype = context_->GetInputDesc(BETA_INDEX)->GetDataType();
@@ -395,6 +401,7 @@ void RecurrentKdaTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "vectorCoreNum: [%u]", tilingData_.vectorCoreNum);
     OP_LOGD(context_->GetNodeName(), "ubCalSize: [%u]", tilingData_.ubCalSize);
     OP_LOGD(context_->GetNodeName(), "ubRestBytes: [%u]", tilingData_.ubRestBytes);
+    OP_LOGD(context_->GetNodeName(), "isA6(ascend960dt): [%d]", compileInfo_.isA6 ? 1 : 0);
     OP_LOGD(context_->GetNodeName(), "t: [%u]", tilingData_.t);
     OP_LOGD(context_->GetNodeName(), "seqLen: [%u]", tilingData_.seqLen);
     OP_LOGD(context_->GetNodeName(), "nk: [%u]", tilingData_.nk);

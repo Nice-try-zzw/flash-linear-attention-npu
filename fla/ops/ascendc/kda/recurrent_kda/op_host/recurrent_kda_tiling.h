@@ -26,7 +26,9 @@ using namespace RecurrentKda;
 struct RecurrentKdaCompileInfo {
     uint64_t aivNum{0UL};
     uint64_t ubSize{0UL};
-    bool isA5{false};
+    bool isRegbase{false};
+    // A6(ascend960dt, DAV_9201)：384KB vector UB + vector 三发射，使用独立的 UB 切分与 VF 策略。
+    bool isA6{false};
 };
 
 struct RecurrentKdaInfo {
