@@ -1049,6 +1049,46 @@ private:
         }
     }
 
+    // A6 通用回退路径（K != 128）：delta⊗k 外积累加进 state，并计算 state·q 半成品。
+    // 与 A5(arch35) 同名实现一致，不依赖任何 A5 特有机制。
+    __aicore__ inline void ProcessKQ(const LocalTensor<float> &cubeTensor, const LocalTensor<float> &vec1Tensor,
+                                          LocalTensor<float> &dst1Tensor, const LocalTensor<float> &vec2Tensor,
+                                          LocalTensor<float> &dst2Tensor, uint32_t rows)
+    {
+        __ubuf__ float* cubeAddr = (__ubuf__ float*)cubeTensor.GetPhyAddr();
+        __ubuf__ float* vec1Addr = (__ubuf__ float*)vec1Tensor.GetPhyAddr();
+        __ubuf__ float* vec2Addr = (__ubuf__ float*)vec2Tensor.GetPhyAddr();
+        __ubuf__ float* dst1Addr = (__ubuf__ float*)dst1Tensor.GetPhyAddr();
+        __ubuf__ float* dst2Addr = (__ubuf__ float*)dst2Tensor.GetPhyAddr();
+
+        uint16_t rowNum = static_cast<uint16_t>(rows);
+        uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(alignK_, V_LENGTH));
+        uint32_t colLength = alignK_;
+        __VEC_SCOPE__
+        {
+            RegTensor<float> cube;
+            RegTensor<float> vec1;
+            RegTensor<float> vec2;
+            RegTensor<float> dst1;
+            RegTensor<float> dst2;
+            MaskReg pregLoop;
+            for (uint16_t j = 0; j < colLoopTimes; j++) {
+                pregLoop = UpdateMask<float>(colLength);
+                DataCopy(vec1, vec1Addr + j * V_LENGTH);
+                DataCopy(vec2, vec2Addr + j * V_LENGTH);
+                for (uint16_t i = 0; i < rowNum; i ++) {
+                    DataCopy<float, LoadDist::DIST_BRC_B32>(cube, cubeAddr + i);
+                    DataCopy(dst1, dst1Addr + i * alignK_ + j * V_LENGTH);
+                    Mul(cube, cube, vec1, pregLoop);
+                    Add(dst1, dst1, cube, pregLoop);
+                    Mul(dst2, dst1, vec2, pregLoop);
+                    DataCopy(dst1Addr + i * alignK_ + j * V_LENGTH, dst1, pregLoop);
+                    DataCopy(dst2Addr + i * alignK_ + j * V_LENGTH, dst2, pregLoop);
+                }
+            }
+        }
+    }
+
     // A6 token 级融合 VF（K=V=128）。一次 __VEC_SCOPE__ 内完成
     //   state *= gate ; dot = state·k ; delta = (v - dot) * beta ; state += delta⊗k ; o = state·q
     // 与 A5 两段式实现（DecayMatVecReduce128 + ProcessDeltaKQReduce128）相比：
