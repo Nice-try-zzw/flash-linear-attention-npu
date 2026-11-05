@@ -309,13 +309,19 @@ def _visible_outputs(outputs, spec):
 def run_cpu(spec: dict[str, Any], high_precision: bool = False):
     torch.set_num_threads(1)
     inputs = build_inputs(spec, torch.device("cpu"), high_precision)
-    storage_dtype = (torch.bfloat16 if spec.get("soc", "ascend950") == "ascend950"
-                     and spec.get("state_dtype", "fp32") == "bf16" and not spec.get("initial_none") else None)
+    # A5/A6 的静态 UB 路径都按 State dtype 存 bank：bf16 state 每个 token 都会做 bf16 舍入，
+    # 因此 golden 必须模拟同样的存储 dtype（与具体 soc 无关）。
+    storage_dtype = (torch.bfloat16 if spec.get("state_dtype", "fp32") == "bf16"
+                     and not spec.get("initial_none") else None)
     out, state = _visible_outputs(recurrent_kda_reference(**inputs, **call_options(spec),
                                                           state_storage_dtype=storage_dtype), spec)
-    # 与算子公开 dtype 对齐：out 固定 BF16，state 跟随 state_dtype（FP32/BF16）。
+    # 与算子公开 dtype 对齐：out 固定 BF16；state 跟随 state_dtype。
+    # initial_state=None 时 Python wrapper 用 FP32 scratch，DUT 返回的 state 也是 FP32。
     # 高精度只在内部计算里生效，返回的 golden 必须和 DUT 同 dtype，否则 ATK 会拒绝比较。
-    state_out_dtype = torch.float32 if spec.get("state_dtype", "fp32") == "fp32" else torch.bfloat16
+    if spec.get("initial_none"):
+        state_out_dtype = torch.float32
+    else:
+        state_out_dtype = torch.float32 if spec.get("state_dtype", "fp32") == "fp32" else torch.bfloat16
     return out.to(torch.bfloat16), state.to(state_out_dtype)
 
 

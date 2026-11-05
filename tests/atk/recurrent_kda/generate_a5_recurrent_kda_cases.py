@@ -107,7 +107,7 @@ def iter_specs():
     for i, s in enumerate([17, 33, 129, 257, 513, 1024]):
         yield dict(name=f"single_S{s}", T=s, B=1, H=1, HV=1, V=128,
                    layout="TND", cu=True, state_v_first=(i % 2 == 0),
-                   state_dtype="bf16" if i % 2 else "fp32", norm=(i % 2 == 1))
+                   state_dtype="bf16" if i % 2 else "fp32", use_qk_l2norm_in_kernel=(i % 2 == 1))
 
     # 6) 大量超短段：B=32/64，S=1/2/3
     for i, (s, b) in enumerate([(1, 64), (2, 32), (3, 32), (1, 32), (2, 64), (4, 16)]):
@@ -146,21 +146,30 @@ def iter_specs():
                    strided_state=(i % 2 == 0))
 
     # 9) gate / beta 组合：raw+safe+sigmoid+negative、dtype 三分支
+    # 注意：executor 使用公开属性名 use_qk_l2norm_in_kernel / use_gate_in_kernel /
+    # use_beta_sigmoid_in_kernel / allow_neg_eigval，以及 g_dtype / beta_dtype。
     gate_cases = [
-        dict(norm=True, raw_gate=True, safe_gate=True, beta_sigmoid=True, negative=True,
-             gate_dtype="fp32", beta_dtype="fp32"),
-        dict(norm=True, raw_gate=True, safe_gate=False, beta_sigmoid=True, negative=False,
-             gate_dtype="bf16", beta_dtype="fp16"),
-        dict(norm=False, raw_gate=True, safe_gate=False, beta_sigmoid=False, negative=False,
-             gate_dtype="fp16", beta_dtype="bf16"),
-        dict(norm=True, raw_gate=False, beta_sigmoid=True, gate_dtype="fp32", beta_dtype="bf16"),
-        dict(norm=False, raw_gate=False, gate_dtype="bf16", beta_dtype="fp32"),
-        dict(norm=True, raw_gate=True, safe_gate=True, beta_sigmoid=False,
-             gate_dtype="fp32", beta_dtype="fp16", large_gate=True),
-        dict(norm=True, raw_gate=True, beta_sigmoid=True, dt_bias_none=True,
-             gate_dtype="fp32", beta_dtype="fp32"),
-        dict(norm=True, raw_gate=True, safe_gate=True, gate_dtype="bf16", beta_dtype="bf16",
-             pattern="small"),
+        dict(use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=True,
+             use_beta_sigmoid_in_kernel=True, allow_neg_eigval=True,
+             g_dtype="fp32", beta_dtype="fp32"),
+        dict(use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=False,
+             use_beta_sigmoid_in_kernel=True,
+             g_dtype="bf16", beta_dtype="fp16"),
+        dict(use_qk_l2norm_in_kernel=False, use_gate_in_kernel=True, safe_gate=False,
+             use_beta_sigmoid_in_kernel=False,
+             g_dtype="fp16", beta_dtype="bf16"),
+        dict(use_qk_l2norm_in_kernel=True, use_gate_in_kernel=False,
+             use_beta_sigmoid_in_kernel=True, g_dtype="fp32", beta_dtype="bf16"),
+        dict(use_qk_l2norm_in_kernel=False, use_gate_in_kernel=False,
+             g_dtype="bf16", beta_dtype="fp32"),
+        dict(use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=True,
+             use_beta_sigmoid_in_kernel=False,
+             g_dtype="fp32", beta_dtype="fp16", large_gate=True),
+        dict(use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
+             use_beta_sigmoid_in_kernel=True, dt_bias_none=True,
+             g_dtype="fp32", beta_dtype="fp32"),
+        dict(use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=True,
+             g_dtype="bf16", beta_dtype="bf16", pattern="small"),
     ]
     for i, extra in enumerate(gate_cases):
         yield dict(name=f"gate{i}", T=[9, 17, 33, 16, 17, 65, 17, 129][i], B=1,
@@ -206,7 +215,7 @@ def iter_specs():
     for i, (h, hv) in enumerate(H_HV):
         yield dict(name=f"ratio_H{h}_HV{hv}", T=33, B=2, H=h, HV=hv, V=128,
                    layout="TND", cu=True, state_v_first=(i % 2 == 0),
-                   state_dtype="fp32" if i % 3 else "bf16", norm=True)
+                   state_dtype="fp32" if i % 3 else "bf16", use_qk_l2norm_in_kernel=True)
 
 
 def _segments(spec):
