@@ -20,7 +20,7 @@ GDN recurrent 的函数接口。
 
 - 不提供内部 state 矩阵任意转置或步长采样的低性能 gather/scatter 路径。
 - 不支持把 `KdaGateCumsum` 的输出流水作为公开前置步骤。
-- A2/A3 通过第 17 节的时间窗口支持长序列；保持逐 token recurrent 公式和 AIV-only 路径。A5/A6 仍限制每段长度 <=8。
+- A2/A3 通过第 17 节的时间窗口支持长序列；保持逐 token recurrent 公式和 AIV-only 路径。A5/A6 的 V=128 路径同样支持长序列（状态驻留 UB：A5 按 8-token 窗口、A6 按 16-token 窗口），V=256 仍限制每段长度 <=8。
 
 ## 3. 能力边界
 
@@ -44,10 +44,7 @@ GDN recurrent 的函数接口。
 
 若 use_qk_l2norm_in_kernel=True，A2/A3 对每个 token/head 的 q/k 在最后一维
 按 FP32 计算 x / sqrt(sum(x*x) + 1e-6)，随后仅 q 乘以 scale。
-A5 保持现有无 epsilon 的实现（x / sqrt(sum(x*x))，范数为 0 的行跳过缩放）。
-A6 的归一化 VF 采用 1e-6，与 A2/A3 以及 A5 优化分支（`codex/recurrent-kda-x8-pr`）对齐。
-相对差异约为 `1e-6 / (sum + 1e-6)`：`sum` 为 O(1) 的常规输入约 1e-8；`sum ≲ 1e-6`（q/k 元素极小）
-时差异显著，此时 A6 与 A2/A3 标杆一致、A5 与该标杆分歧（详见 960dt 专项设计 6.1）。
+A5（`arch35`）与 A6（`arch92`）的新实现同样使用该 1e-6 口径，三条路径数值一致。
 关闭该属性时不执行归一化。
 
 `use_gate_in_kernel=false` 时，`g` 已经是 step log gate。`use_gate_in_kernel=true` 时，kernel 内转换 raw gate：
@@ -78,12 +75,11 @@ o_t = S @ q_t
 
 ## 5. 整体架构
 
-A5（DAV_3510）使用 `op_kernel/arch35/recurrent_kda.h`，A6（DAV_9201）使用独立的
-`op_kernel/arch92/recurrent_kda.h`。两者沿用相同的短序列数学语义与任务划分，但 A6 针对 960dt 的
-vector 三发射（两条短指令 + 一条长指令并行）和 384KB UB 做了独立实现（token 级融合 VF、4 行行块交织、
-输出 ring 加深），详见 [design_960dt.md](./design_960dt.md)。Host 的 `isRegbase` 表示走 arch35/arch92
-的 regbase 短序列路径（同时覆盖 A5 与 A6），`isA6` 再选择 A6 专属的 UB 切分；UB 容量从实际平台读取。
-A2/A3 保留原有多时间窗口路径。
+A5（DAV_3510）与 A6（DAV_9201）都走静态 UB + 资源 Mutex + 逐 token VF 的同一套实现：
+A5 用 `op_kernel/arch35/`（窗口 8、3 个 State bank、248KB 可用 UB），A6 用 `op_kernel/arch92/`
+（窗口 16、4 个 State bank、384KB UB），两者只在架构常量上不同，详见 [design_960dt.md](./design_960dt.md)。
+Host 的 `isRegbase` 表示走 arch35/arch92 的 regbase 路径，`isA5` / `isA6` 再选择对应的静态 UB 参数；
+UB 容量从实际平台读取。A2/A3 保留原有多时间窗口路径。
 
 - `op_host/op_api/aclnn_recurrent_kda.cpp`：校验 dtype、layout、shape、可选输入组合；不读取 device metadata 的值；
   对规则非连续 Q/K/V 保留 stride/storage offset，已验证布局回退连续化，token/head 置换或
@@ -102,7 +98,7 @@ A2/A3 保留原有多时间窗口路径。
 Tiling 按逻辑序列和 value head 拆分任务。提供 `cu_seqlens` 时，`seq_num=len(cu_seqlens)-1`，使用与
 fla-org 一致的累计边界语义，第 `i` 条序列范围为 `[cu_seqlens[i], cu_seqlens[i+1])`；未提供时，
 BSND 按 batch 行划分序列，TND 视为一条序列。接口面向 decode / MTP 短序列：每个相邻 offset
-的差值表示 varlen 每段长度；A2/A3 不再限制为 8，A5/A6 每段与 dense 单序列仍须 <=8。提供 cu_seqlens 时，末项表示有效 token 数，可小于图捕获的
+的差值表示 varlen 每段长度；A2/A3 不再限制为 8，A5/A6 的 V=128 路径同样支持多窗口长序列（A5 窗口 8、A6 窗口 16），V=256 每段与 dense 单序列仍须 <=8。提供 cu_seqlens 时，末项表示有效 token 数，可小于图捕获的
 token capacity。
 
 ### 6.2 Tiling Data
@@ -111,7 +107,7 @@ token capacity。
 | --- | --- | --- |
 | `vectorCoreNum` | `uint32_t` | 使用的 AIV core 数 |
 | `ubCalSize` | `uint32_t` | 平台 UB 预算上限 |
-| `ubRestBytes` | `uint32_t` | A2/A3 命名 scratch 实际字节数；A5/A6 保持原剩余预算语义 |
+| `ubRestBytes` | `uint32_t` | A2/A3 命名 scratch 实际字节数；A6 V=128 静态布局总字节数；其余路径为剩余预算 |
 | `t` / `seqLen` | `uint32_t` | token 总数与输入物理序列轴长度 |
 | `nk` / `dk` | `uint32_t` | query/key head 数与 K 维 |
 | `nv` / `dv` | `uint32_t` | value head 数与 V 维 |
@@ -119,6 +115,9 @@ token capacity。
 | `ssmStateStride` | `uint32_t` | 二维 speculative state 索引的行 stride；packed 一维索引时为 0 |
 | `query/key/value TokenStride` | `uint64_t` | Q/K/V 相邻逻辑 token 的元素 stride |
 | `query/key/value HeadStride` | `uint64_t` | Q/K/V 相邻 head 的元素 stride |
+| `query/key/value BatchStride` | `uint64_t` | BSND 且无 `cu_seqlens` 时的 batch stride；否则为 0 |
+| `windowSize` | `uint32_t` | A6 V=128 静态路径的 token 窗口（16）；其余路径为 0 |
+| `vfFlags` / `headRatio` | `uint32_t` | A6 V=128 的 VF 功能位与 `HV/H`；其余路径为 0 |
 | `vStep` | `uint32_t` | 单次处理的 V 方向步长 |
 | `stateOutBufferNum` / `attnOutBufferNum` | `uint32_t` | UB ring buffer 数 |
 | `scale` / `lowerBound` | `float` | query scale 与 safe gate 下界 |
@@ -128,9 +127,19 @@ token capacity。
 
 ### 6.3 模板化方案与 tiling key
 
-当前 kernel 通过 `REGISTER_TILING_DEFAULT(RecurrentKdaTilingData)` 使用默认 tiling data，不引入额外 tiling key。
-dtype 固定为 BF16 QKV，state dtype 由编译宏 `DTYPE_INITIAL_STATE` 实例化；layout、gate/beta 分支和可选输入存在性由
-tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
+kernel 通过 `REGISTER_TILING_DEFAULT(RecurrentKdaTilingData)` 使用默认 tiling data，并由
+`recurrent_kda_tiling_key.h` 声明两位 `KERNEL_MODE`：
+
+| key | 路径 |
+| --- | --- |
+| `COMPAT`(0) | A2/A3、A5 以及 A6 的 V=256 兼容实例（TPipe 通用实现） |
+| `V_FIRST`(1) | A6 V=128，V-first State（未满足融合条件） |
+| `K_FIRST`(2) | A6 V=128，K-first State |
+| `V_FIRST_FUSED`(3) | A6 V=128，V-first State 且满足融合条件 |
+
+host 在 `DoLibApiTiling` 里用 `GET_TPL_TILING_KEY(kernelMode)` 选实例；融合条件由 `vfFlags`
+决定（开 norm/raw gate/dt_bias/sigmoid，关 negative/safe gate/indices）。其余 dtype 与可选输入
+分支仍由 tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 
 ## 7. Kernel 设计
 
@@ -141,9 +150,10 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 3. 按 Q/K/V 各自 token/head stride 计算 GM 首地址并二维搬运到紧凑 UB；随后按属性执行 q/k
    normalize、raw gate 转换和 beta sigmoid。
 4. 对状态做 gate decay，计算 `S @ k`、delta 和 outer 更新。
-5. 计算 `S @ q` 写回 `out`，并把状态原位写回命中的 state pool 槽。A6 在无 `ssm_state_indices`
-   时同一 `(batch, head)` 任务的所有 token 命中同一槽，中间态写回会被后一个 token 覆盖，因此只写最后
-   一个 token（GM 落盘结果等价，见 960dt 专项设计 5.1）；有 `ssm_state_indices` 时仍逐 token 写回。
+5. 计算 `S @ q` 写回 `out`，并把状态原位写回命中的 state pool 槽。A5/A6 的静态 UB 路径在无
+   `ssm_state_indices` 时同一 `(batch, head)` 任务的所有 token 命中同一槽，中间态写回会被后一个
+   token 覆盖，因此只写最后一个 token（GM 落盘结果等价，见 960dt 专项设计第 4 节）；
+   有 `ssm_state_indices` 时仍逐 token 写回。
 
 ### 7.2 内存规划
 
@@ -175,8 +185,8 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 | --- | --- | --- | --- |
 | A2 | `ascend910b` | 公共 AIV kernel | 无 |
 | A3 | `ascend910_93` | 公共 AIV kernel | 无 |
-| A5 | `ascend950` | arch35 特化 AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
-| A6 | `ascend960dt` | arch92 特化 AIV kernel | RegBase/DataCopy 路径，每段长度 <=8；token 级融合 VF + 4 行行块交织（三发射），384KB UB 下加深输出 ring 并降低 `repeat` |
+| A5 | `ascend950` | arch35 静态 UB AIV kernel | 248KB 可用 UB：窗口 8 token、3 个 State bank；V=128 支持长序列（状态驻留 UB），V=256 每段长度 <=8；4 行行块 + `MulAddDst` 折叠 |
+| A6 | `ascend960dt` | arch92 特化 AIV kernel（移植 A5 静态 UB 实现） | 384KB UB：窗口 16 token、4 个 State bank 轮转；V=128 支持长序列（状态驻留 UB），V=256 每段长度 <=8；4 行行块 + `MulAddDst` 折叠吃三发射 |
 
 ## 9. 精度设计
 
@@ -186,13 +196,12 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 
 目标场景是 decode/MTP recurrent 小步长，主要瓶颈是状态矩阵读写和每 token 的 `S @ k`、`outer(delta,k)`、`S @ q`。
 当前实现已使用输入/输出双缓冲，并在 arch35/arch92 的 `K=128` 路径采用融合归约和 repeat DataCopy。
-A6 在此基础上进一步：把 decay / `S@k` / delta / outer / `S@q` 收进单个 `__VEC_SCOPE__`，状态每 token
-只回写一次（UB 状态流量 2 读 2 写 → 1 读 1 写）；V 方向相邻 4 行按"行块 × 两段连续 64 lane"交织成
-8 条短指令流，并用 `MulAddDst` 折叠每行归约，使 `ReduceSum`/`Exp`/`Div` 等长指令与短指令同拍发射；
-标量链收敛到 `VL1` mask；q/k normalize 与 raw gate 改为整块 VF，去掉逐行 barrier 与 V→S 同步；
-state 写回按语义合并（无 `ssm_state_indices` 时同一 `(batch, head)` 任务内只写最后一个 token，
-GM 结果逐位不变）；UB 切分对 state 布局与写回语义敏感（K-first 逐 token 落盘时优先保证输出 ring 深度 2）。
-A6 走独立实现，不保留回退 A5 的编译开关。详细设计与收益估算见 [design_960dt.md](./design_960dt.md)。
+A5/A6 走同一套静态 UB 流水：UB 由编译期常量寻址，跨流水依赖用 Mutex 资源锁保护（A5 12 份、A6 14 份），
+每 token 一次 VF 完成 decay / `S@k` / delta / outer / `S@q`；V 方向相邻 4 行按"行块 × 两段连续
+64 lane"交织成 8 条短指令流，并用 `MulAddDst` 折叠每行归约，使 `ReduceSum`/`Exp`/`Div` 等长指令
+与短指令同拍发射。A6 相对 A5 的增量只有两条：384KB 下窗口 8→16（每 tile DMA 次数减半）与 State bank
+3→4（逐 token 落盘时多一份快照在飞）。V=256 走同一兼容实例。详细设计与 UB 账见
+[design_960dt.md](./design_960dt.md)。
 后续优化仍应以状态搬运、向量流水和同步开销为重点。
 
 ## 11. 测试设计
@@ -228,7 +237,8 @@ A2/A5 精度验证过程中修复以下问题：
   batch 维可按 `T * tokenStride` 扁平化。已验证的 feature-gap、zero-stride、batch-gap view
   自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
 - 当前 `K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
-- A2/A3 内部时间窗口容量为 8，支持多窗口序列；A5/A6 每段仍限制为 <=8。
+- A2/A3 内部时间窗口容量为 8，支持多窗口序列；A5 的 V=128 路径按 8-token 窗口、A6 按 16-token
+  窗口递推，均支持多窗口长序列；V=256 每段仍限制为 <=8。
 - state 最后两维必须为行主序稠密矩阵；slot/head 维可有间隔但不得重叠。
 - 显式 slot 模式要求所有活跃序列的写槽互不冲突，且 slot 值位于 state pool 容量范围内。
 - 后续若扩展长序列或更多 dtype，需要同步更新 op_host 校验、tiling、kernel、本地测试 case 和 API 文档。

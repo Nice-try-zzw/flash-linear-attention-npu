@@ -19,6 +19,26 @@
 
 namespace RecurrentKda {
 
+// 静态 UB 路径按架构固定参数：A5(DAV_3510) 用 248KB 可用 UB、8 token 窗口、3 个 State bank；
+// A6(ascend960dt, DAV_9201) 用 384KB、16 token 窗口、4 个 State bank。
+constexpr uint32_t RKDA_A5_WINDOW_TOKENS = 8;
+constexpr uint32_t RKDA_A5_BANK_COUNT = 3;
+constexpr uint32_t RKDA_A6_WINDOW_TOKENS = 16;
+constexpr uint32_t RKDA_A6_BANK_COUNT = 4;
+
+// A6 静态 VF 配置，由 host tiling 一次算好；bank/槽的运行时归属仍只由 kernel 决定。
+enum RecurrentKdaVfFlags : uint32_t {
+    RKDA_VF_NORM = 1U << 0,
+    RKDA_VF_RAW_GATE = 1U << 1,
+    RKDA_VF_BIAS = 1U << 2,
+    RKDA_VF_SIGMOID = 1U << 3,
+    RKDA_VF_NEGATIVE = 1U << 4,
+    RKDA_VF_SAFE = 1U << 5,
+    RKDA_VF_WRITE_STATE = 1U << 6,
+    RKDA_VF_INDEXED = 1U << 7,
+    RKDA_VF_FUSED = 1U << 8,
+};
+
 #pragma pack(push, 8)
 struct alignas(8) RecurrentKdaTilingData {
     uint32_t vectorCoreNum;
@@ -71,6 +91,12 @@ struct alignas(8) RecurrentKdaTilingData {
     uint64_t keyHeadStride;
     uint64_t valueTokenStride;
     uint64_t valueHeadStride;
+    uint32_t windowSize; // A6 V=128 静态路径的 token 窗口；其余路径忽略。
+    uint64_t queryBatchStride;
+    uint64_t keyBatchStride;
+    uint64_t valueBatchStride;
+    uint32_t vfFlags;   // A6 V=128 静态 VF 的功能位；其余路径为 0。
+    uint32_t headRatio; // HV/H，A6 静态路径据此把 value head 映射到 k/q head。
 };
 #pragma pack(pop)
 

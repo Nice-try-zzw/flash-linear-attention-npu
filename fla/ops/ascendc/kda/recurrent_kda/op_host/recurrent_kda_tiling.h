@@ -27,6 +27,8 @@ struct RecurrentKdaCompileInfo {
     uint64_t aivNum{0UL};
     uint64_t ubSize{0UL};
     bool isRegbase{false};
+    // A5(ascend950, DAV_3510)：248KB 可用 UB + 8 token 窗口 + 3 个 State bank 的静态 UB 路径。
+    bool isA5{false};
     // A6(ascend960dt, DAV_9201)：384KB vector UB + vector 三发射，使用独立的 UB 切分与 VF 策略。
     bool isA6{false};
 };
@@ -73,7 +75,7 @@ protected:
     bool CheckFormat(ge::Format format, const std::string &Desc);
 
     RecurrentKdaCompileInfo compileInfo_;
-    RecurrentKdaTilingData tilingData_;
+    RecurrentKdaTilingData tilingData_{};
     RecurrentKdaInfo inputParams_;
 };
 

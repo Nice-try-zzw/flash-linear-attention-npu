@@ -22,6 +22,7 @@
 #include "tiling/tiling_api.h"
 #include "util/math_util.h"
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -104,6 +105,8 @@ struct RecurrentKdaTilingContext {
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
     uint32_t isRegbase = 0;
+    // A5(DAV_3510)：248KB 可用 UB + 8 token 窗口 + 3 个 State bank 的静态 UB 路径。
+    uint32_t isA5 = 0;
     // A6(ascend960dt, DAV_9201)：384KB vector UB + 三发射，走独立的 UB 切分策略。
     uint32_t isA6 = 0;
 };
@@ -136,6 +139,16 @@ public:
 
     ge::graphStatus ProcessUb(RecurrentKdaTilingData &tiling) const
     {
+        tiling.windowSize = 0;
+        tiling.vfFlags = 0;
+        tiling.headRatio = 0;
+        // V=128 在 A5/A6 上走静态 UB + 全 token VF 路径；V=256 仍用每段 <=8 的兼容路径。
+        if (ctx_.isA6 != 0 && tiling.dv == 128) {
+            return PlanA6Ub(tiling);
+        }
+        if (ctx_.isA5 != 0 && tiling.dv == 128) {
+            return PlanA5Ub(tiling);
+        }
         struct RuleItem {
             const char *name;
             ge::graphStatus (RecurrentKdaTilingProcessor::*fn)(RecurrentKdaTilingData &, UbCalcContext &) const;
@@ -566,6 +579,10 @@ private:
         tiling.keyHeadStride = static_cast<uint64_t>(keyStrides[headDim]);
         tiling.valueTokenStride = static_cast<uint64_t>(valueStrides[tokenDim]);
         tiling.valueHeadStride = static_cast<uint64_t>(valueStrides[headDim]);
+        // A6 静态路径按 (batch, head) 任务寻址输入；有 cu_seqlens/TND 时只按 token 线性寻址。
+        tiling.queryBatchStride = ctx_.hasCuSeqlens ? 0 : static_cast<uint64_t>(queryStrides[0]);
+        tiling.keyBatchStride = ctx_.hasCuSeqlens ? 0 : static_cast<uint64_t>(keyStrides[0]);
+        tiling.valueBatchStride = ctx_.hasCuSeqlens ? 0 : static_cast<uint64_t>(valueStrides[0]);
         const auto stateInStrides = ResolveStateStrides(false);
         const auto stateOutStrides = ResolveStateStrides(true);
         tiling.stateInStride0 = static_cast<uint64_t>(stateInStrides[RKDA_DIM_0]);
@@ -678,6 +695,67 @@ private:
         return ge::GRAPH_SUCCESS;
     }
 
+    // A5/A6 的 V=128 静态 UB 方案共用同一套地址公式，只差可用容量、窗口与 bank 数。
+    // 每 token：q/k/v 3*512 + gate 1024 + beta 64 + out 512 = 3136；
+    // 固定项：参数 2*544=1088 + guard 2048 = 3136。
+    ge::graphStatus PlanStaticUb(RecurrentKdaTilingData &tiling, uint64_t capacity,
+                                 uint32_t x, uint32_t banks, const char *tag) const
+    {
+        using namespace RecurrentKda;
+        constexpr uint64_t bankBytes = 64ULL * 1024ULL;
+        // K-first FP32 的 bank 采用 128x136 行间距（32B 对齐），每 bank 多 4KiB。
+        const uint64_t statePadding = !ctx_.stateVFirst && ctx_.stateDtype == ge::DT_FLOAT ?
+            static_cast<uint64_t>(banks) * 4ULL * 1024ULL : 0;
+        const uint64_t bytes = static_cast<uint64_t>(banks) * bankBytes + statePadding +
+                               3136ULL * static_cast<uint64_t>(x) + 3136ULL;
+        OP_CHECK_IF(bytes > capacity,
+                    OP_LOGE(ctx_.nodeName,
+                            "%s static UB layout needs %llu bytes, but UB capacity is %llu bytes.",
+                            tag, static_cast<unsigned long long>(bytes),
+                            static_cast<unsigned long long>(capacity)),
+                    return ge::GRAPH_FAILED);
+        tiling.windowSize = x;
+        tiling.vfFlags = (tiling.useQkL2norm ? RKDA_VF_NORM : 0U) |
+            (tiling.useGateInKernel ? RKDA_VF_RAW_GATE : 0U) |
+            (tiling.hasDtBias ? RKDA_VF_BIAS : 0U) |
+            (tiling.useBetaSigmoid ? RKDA_VF_SIGMOID : 0U) |
+            (tiling.allowNegEigval ? RKDA_VF_NEGATIVE : 0U) |
+            (tiling.safeGate ? RKDA_VF_SAFE : 0U) |
+            ((tiling.inplaceFinalState || tiling.outputFinalState) ? RKDA_VF_WRITE_STATE : 0U) |
+            (tiling.hasSsmStateIndices ? RKDA_VF_INDEXED : 0U);
+        constexpr uint32_t fusedMask = RKDA_VF_NORM | RKDA_VF_RAW_GATE | RKDA_VF_BIAS |
+            RKDA_VF_SIGMOID | RKDA_VF_NEGATIVE | RKDA_VF_SAFE | RKDA_VF_INDEXED;
+        constexpr uint32_t fusedValue = RKDA_VF_NORM | RKDA_VF_RAW_GATE | RKDA_VF_BIAS | RKDA_VF_SIGMOID;
+        if ((tiling.vfFlags & fusedMask) == fusedValue) {
+            tiling.vfFlags |= RKDA_VF_FUSED;
+        }
+        tiling.headRatio = tiling.nv / tiling.nk;
+        tiling.ubCalSize = static_cast<uint32_t>(capacity);
+        tiling.ubRestBytes = static_cast<uint32_t>(bytes);
+        tiling.vStep = tiling.dv;
+        tiling.stateOutBufferNum = banks;
+        tiling.attnOutBufferNum = RKDA_MAX_OUT_BUFFER_NUM;
+        OP_LOGD(ctx_.nodeName, "%s static UB: window [%u], banks [%u], bytes [%llu], vfFlags [0x%x]",
+                tag, tiling.windowSize, tiling.stateOutBufferNum,
+                static_cast<unsigned long long>(bytes), tiling.vfFlags);
+        return ge::GRAPH_SUCCESS;
+    }
+
+    // A5(DAV_3510)：可用 UB 按 248KB 计，窗口 8、3 个 State bank（约 219.6KB / 231.6KB）。
+    ge::graphStatus PlanA5Ub(RecurrentKdaTilingData &tiling) const
+    {
+        using namespace RecurrentKda;
+        return PlanStaticUb(tiling, std::min<uint64_t>(ctx_.ubSize, 248ULL * 1024ULL),
+                            RKDA_A5_WINDOW_TOKENS, RKDA_A5_BANK_COUNT, "A5");
+    }
+
+    // A6(ascend960dt)：384KB 预算下窗口 16、4 个 State bank（约 308KB / 320KB）。
+    ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
+    {
+        using namespace RecurrentKda;
+        return PlanStaticUb(tiling, ctx_.ubSize, RKDA_A6_WINDOW_TOKENS, RKDA_A6_BANK_COUNT, "A6");
+    }
+
     int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
         const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
@@ -759,124 +837,32 @@ private:
         return candidate.vStep > current.vStep;
     }
 
-    // A6(960dt) 候选排序：K-first 时把"state 输出 ring 达到 2 级"提到 repeat 之前；
-    // V-first 仍以 repeat 为先（写回没有强制同步，ring==1 的代价只有一次整 tile Cast 的等待）。
-    //
-    // 依据（K-first 的 state 写回路径，`stateVFirst == 0`）：
-    //   - ring == 1：`CopyOutState` 在 `TransposeVFirstToKFirst` 之后必须立刻 `SyncMte3ToV`
-    //     等待写回完成（转置 scratch 是全程共享的），于是每个 token 变成 "VF + MTE3 串行"；
-    //   - ring == 2：kernel 的 pending 机制把上一 token 的写回推迟到下一 token 的 VF 之后发射，
-    //     每个 token 变成 max(VF, MTE3)，写回被藏到计算背后。
-    // 代价端：多一次 repeat 只增加 tile 级固定开销（一次 VF 进入 + 一次 state tile 预取 +
-    // 每 token 一次 q/k/gate/beta 常量载入），相对每 token 的 VF/MTE3 周期可忽略。
-    // 例：K=128/V=128/FP32 state + ssm_state_indices（逐 token 落盘）时，旧排序落在
-    // (repeat=1, ring 1/2)，新排序落在 (repeat=2, vStep=64, ring 2/2)，把每 token 的
-    // "VF + MTE3 串行" 变成两者重叠。
-    //
-    // 无 ssm_state_indices 时 kernel 只写最后一个 token（中间态必然被覆盖），state ring
-    // 深度不再决定重叠效果，因此回到"repeat 优先"，把 384KB 用在更大的 vStep 上。
-    bool IsBetterProfileA6(const BufferProfile &candidate, const BufferProfile &current) const
-    {
-        if (!current.valid) {
-            return true;
-        }
-        const bool perTokenStateWrite =
-            ctx_.hasSsmStateIndices != 0 && (ctx_.inplaceFinalState != 0 || ctx_.outputFinalState != 0);
-        if (ctx_.stateVFirst == 0 && perTokenStateWrite) {
-            const bool candidateStateDeep = candidate.stateOutBufferNum >= RKDA_MAX_OUT_BUFFER_NUM;
-            const bool currentStateDeep = current.stateOutBufferNum >= RKDA_MAX_OUT_BUFFER_NUM;
-            if (candidateStateDeep != currentStateDeep) {
-                return candidateStateDeep;
-            }
-        }
-        if (candidate.repeatTime != current.repeatTime) {
-            return candidate.repeatTime < current.repeatTime;
-        }
-        if (candidate.stateOutBufferNum != current.stateOutBufferNum) {
-            return candidate.stateOutBufferNum > current.stateOutBufferNum;
-        }
-        if (candidate.attnOutBufferNum != current.attnOutBufferNum) {
-            return candidate.attnOutBufferNum > current.attnOutBufferNum;
-        }
-        return candidate.vStep > current.vStep;
-    }
-
-    // A6(ascend960dt) 384KB：候选表 + `IsBetterProfileA6` 已经把"state ring 2"作为第一优先级；
-    // 这里是兜底：若某形状在任何候选下都拿不到 ring 2，就用真实剩余量继续加厚 ring。
-    //   attn 每级 2*vStep 字节（outType=bf16），state 每级 stateDtypeSize*aDk*vStep 字节。
-    // 加深后 `ubRestBytes` 用更新过的 `queueCoeff` 重算，保证仍然非负。
-    void DeepenOutRingForA6(int64_t ubSize, int64_t aDk,
-                            const RecurrentKdaTilingData &tiling, BufferProfile &profile) const
-    {
-        if (!profile.valid) {
-            return;
-        }
-        const int64_t vStep = static_cast<int64_t>(profile.vStep);
-        const int64_t aNv = Ops::Base::CeilAlign(tiling.nv, static_cast<uint32_t>(16));
-        const int64_t aDv = Ops::Base::CeilAlign(tiling.dv, static_cast<uint32_t>(16));
-        const int64_t fixedUbBytes = CalcFixedUbBytes(aNv, aDv, aDk, tiling.nv);
-        // vStep 相关的环形队列系数（不含固定 scratch 里的 compute 切片）。
-        const int64_t queueCoeff = CalcVStepCoeff(aDk, profile.stateOutBufferNum,
-                                                  profile.attnOutBufferNum) - CalcComputeUbCoeff(aDk);
-        // 与 vStep 同址叠放的 scratch：命名输入镜像 + compute 工作切片。
-        const int64_t scratchBytes = CalcWorkingUbBytes(aNv, aDv, aDk, tiling.nv) - fixedUbBytes +
-                                     CalcComputeUbCoeff(aDk) * vStep;
-        int64_t spareBytes = ubSize - fixedUbBytes - queueCoeff * vStep - scratchBytes;
-        OP_LOGD(ctx_.nodeName, "A6 spare UB [%ld] with vStep [%ld], rings [%u/%u]",
-                spareBytes, vStep, profile.stateOutBufferNum, profile.attnOutBufferNum);
-        const int64_t stateDtypeSize = (ctx_.stateDtype == ge::DT_FLOAT) ? 4 : 2;
-        const int64_t attnOutBytes = 2 * vStep;
-        const int64_t stateOutBytes = stateDtypeSize * aDk * vStep;
-        if (profile.attnOutBufferNum < RKDA_MAX_OUT_BUFFER_NUM && spareBytes >= attnOutBytes) {
-            profile.attnOutBufferNum = RKDA_MAX_OUT_BUFFER_NUM;
-            spareBytes -= attnOutBytes;
-        }
-        if (profile.stateOutBufferNum < RKDA_MAX_OUT_BUFFER_NUM && spareBytes >= stateOutBytes) {
-            profile.stateOutBufferNum = RKDA_MAX_OUT_BUFFER_NUM;
-            spareBytes -= stateOutBytes;
-        }
-        OP_LOGD(ctx_.nodeName, "A6 deepened rings to [%u/%u], leftover UB [%ld]",
-                profile.stateOutBufferNum, profile.attnOutBufferNum, spareBytes);
-    }
-
     ge::graphStatus FinalizeVStepFromUb(int64_t ubSize, int64_t usedUbBytes, int64_t coeff,
                                         RecurrentKdaTilingData &tiling, UbCalcContext &ubCalcCtx) const
     {
         (void)coeff;
         int64_t aDk = Ops::Base::CeilAlign(tiling.dk, static_cast<uint32_t>(16));
         BufferProfile selected;
-        const std::array<BufferProfile, 4> candidates = {{
+        // 非静态路径（A2/A3 与 A6 V=256 兼容路径）沿用 A5 的 3 个候选。
+        const std::array<BufferProfile, 3> candidates = {{
             {1, 1, 0, 0, false},
             {1, 2, 0, 0, false},
             {2, 2, 0, 0, false},
-            {2, 1, 0, 0, false},
         }};
-        // A5(DAV_3510) 保持原有 3 个候选，A6(DAV_9201) 额外评估 state/attn 双向加深候选。
-        const size_t candidateNum = (ctx_.isA6 != 0) ? candidates.size() : candidates.size() - 1;
-        for (size_t i = 0; i < candidateNum; ++i) {
-            const BufferProfile &candidate = candidates[i];
+        for (const auto &candidate : candidates) {
             BufferProfile profile;
             if (!EvaluateBufferProfile(ubSize, usedUbBytes, aDk, candidate.stateOutBufferNum,
                                        candidate.attnOutBufferNum, tiling, profile)) {
                 continue;
             }
-            if (ctx_.isA6 != 0) {
-                if (IsBetterProfileA6(profile, selected)) {
-                    selected = profile;
-                }
-            } else {
-                if (IsBetterProfile(profile, selected)) {
-                    selected = profile;
-                }
+            if (IsBetterProfile(profile, selected)) {
+                selected = profile;
             }
         }
 
         if (!selected.valid) {
             OP_LOGE(ctx_.nodeName, "vStep should be at least %zu, shape is too big", RKDA_MAX_MTP);
             return ge::GRAPH_FAILED;
-        }
-        if (ctx_.isA6 != 0) {
-            DeepenOutRingForA6(ubSize, aDk, tiling, selected);
         }
 
         int64_t queueCoeff = CalcVStepCoeff(aDk, selected.stateOutBufferNum, selected.attnOutBufferNum) -

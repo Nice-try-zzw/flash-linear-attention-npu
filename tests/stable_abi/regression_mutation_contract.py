@@ -91,15 +91,16 @@ def scenario_recurrent_gdr():
 def kda_inputs():
     B, T, H, HV, K, V = 2, 2, 2, 4, 128, 128
     dt = torch.bfloat16
-    q = torch.randn(B, T, H, K, dtype=dt, device="npu")
-    k = torch.randn(B, T, H, K, dtype=dt, device="npu")
-    v = torch.randn(B, T, HV, V, dtype=dt, device="npu")
-    g = -torch.rand(B, T, HV, K, dtype=torch.float32, device="npu") * 5 - 1e-3
-    beta = torch.rand(B, T, HV, dtype=torch.float32, device="npu") * 0.8 + 0.1
+    # cu_seqlens selects packed rank-3 inputs; layout must follow the rank.
+    q = torch.randn(B * T, H, K, dtype=dt, device="npu")
+    k = torch.randn(B * T, H, K, dtype=dt, device="npu")
+    v = torch.randn(B * T, HV, V, dtype=dt, device="npu")
+    g = -torch.rand(B * T, HV, K, dtype=torch.float32, device="npu") * 5 - 1e-3
+    beta = torch.rand(B * T, HV, dtype=torch.float32, device="npu") * 0.8 + 0.1
     cu = torch.tensor([0, T, 2 * T], dtype=torch.int64, device="npu")
     torch.npu.synchronize()
     state = torch.zeros(B, HV, V, K, dtype=torch.float32, device="npu")
-    kw = dict(cu_seqlens=cu, scale=K ** -0.5, layout="BSND",
+    kw = dict(cu_seqlens=cu, scale=K ** -0.5, layout="TND",
               state_v_first=True, output_final_state=True)
     return q, k, v, g, beta, state, kw
 

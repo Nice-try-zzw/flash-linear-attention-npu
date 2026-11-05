@@ -13,6 +13,7 @@
  */
 #include "recurrent_kda_tiling.h"
 
+#include "../op_kernel/recurrent_kda_tiling_key.h"
 #include "err/ops_err.h"
 #include "log/log.h"
 #include "platform/soc_spec.h"
@@ -66,6 +67,7 @@ void RecurrentKdaTiling::InitCompileInfo()
     // The arch35 and arch92 short-sequence kernels use the same regbase UB layout.
     const auto npuArch = ascendcPlatform.GetCurNpuArch();
     compileInfo_.isRegbase = (npuArch == NpuArch::DAV_3510 || npuArch == NpuArch::DAV_9201);
+    compileInfo_.isA5 = (npuArch == NpuArch::DAV_3510);
     // A6 与 A5 共用 regbase 计算流程，但 960dt 的 vector UB 为 384KB 且支持三发射，
     // UB 切分与 kernel 侧 VF 融合需要单独走 A6 策略。
     compileInfo_.isA6 = (npuArch == NpuArch::DAV_9201);
@@ -145,6 +147,7 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     ctx.aivNum = compileInfo_.aivNum;
     ctx.ubSize = compileInfo_.ubSize;
     ctx.isRegbase = compileInfo_.isRegbase ? 1 : 0;
+    ctx.isA5 = compileInfo_.isA5 ? 1 : 0;
     ctx.isA6 = compileInfo_.isA6 ? 1 : 0;
     ctx.stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
     ctx.gateDtype = context_->GetInputDesc(GATE_INDEX)->GetDataType();
@@ -216,7 +219,18 @@ ge::graphStatus RecurrentKdaTiling::DoOpTiling()
 
 ge::graphStatus RecurrentKdaTiling::DoLibApiTiling()
 {
-    tilingKey_ = 0;
+    // A5/A6 的 V=128 静态路径按 State 布局与融合位选编译实例；
+    // A2/A3 以及 A5/A6 的 V=256 都落在兼容实例。
+    uint32_t kernelMode = RKDA_TPL_COMPAT;
+    if ((compileInfo_.isA6 || compileInfo_.isA5) && tilingData_.dv == 128) {
+        if (tilingData_.stateVFirst != 0) {
+            kernelMode = (tilingData_.vfFlags & RecurrentKda::RKDA_VF_FUSED) != 0 ?
+                RKDA_TPL_V_FIRST_FUSED : RKDA_TPL_V_FIRST;
+        } else {
+            kernelMode = RKDA_TPL_K_FIRST;
+        }
+    }
+    tilingKey_ = GET_TPL_TILING_KEY(kernelMode);
     return ge::GRAPH_SUCCESS;
 };
 
@@ -402,6 +416,7 @@ void RecurrentKdaTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "ubCalSize: [%u]", tilingData_.ubCalSize);
     OP_LOGD(context_->GetNodeName(), "ubRestBytes: [%u]", tilingData_.ubRestBytes);
     OP_LOGD(context_->GetNodeName(), "isA6(ascend960dt): [%d]", compileInfo_.isA6 ? 1 : 0);
+    OP_LOGD(context_->GetNodeName(), "isA5(ascend950): [%d]", compileInfo_.isA5 ? 1 : 0);
     OP_LOGD(context_->GetNodeName(), "t: [%u]", tilingData_.t);
     OP_LOGD(context_->GetNodeName(), "seqLen: [%u]", tilingData_.seqLen);
     OP_LOGD(context_->GetNodeName(), "nk: [%u]", tilingData_.nk);
@@ -447,6 +462,9 @@ void RecurrentKdaTiling::PrintTilingData()
             static_cast<unsigned long long>(tilingData_.valueTokenStride));
     OP_LOGD(context_->GetNodeName(), "valueHeadStride: [%llu]",
             static_cast<unsigned long long>(tilingData_.valueHeadStride));
+    OP_LOGD(context_->GetNodeName(), "windowSize: [%u]", tilingData_.windowSize);
+    OP_LOGD(context_->GetNodeName(), "vfFlags: [0x%x]", tilingData_.vfFlags);
+    OP_LOGD(context_->GetNodeName(), "headRatio: [%u]", tilingData_.headRatio);
 }
 
 ge::graphStatus RecurrentKdaTiling::CalUbSize()

@@ -1,1367 +1,666 @@
-/**
- * Copyright (c) 2025-2026 Tianjin University, Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- */
+// Copyright (c) 2025-2026 Tianjin University, Ltd.
+// Licensed under CANN Open Software License Agreement Version 2.0.
+#pragma once
+#include "recurrent_kda_vec.h"
 
-/*!
- * \file recurrent_kda.h
- * \brief Single-kernel fused recurrent KDA implementation.
- */
+/*
+Stage | 生产者/消费者 | 同步
+  0   | MTE2 将输入、初态、参数搬到UB | 对应资源的Mutex Lock/Unlock
+  1   | VF 消费UB并递推State、收集out | 输入/参数/out按槽；State区分访问与快照
+  2   | MTE3 搬出整tile out和State   | out槽或State快照Mutex
 
-#ifndef __RECURRENT_KDA_KERNEL_H_
-#define __RECURRENT_KDA_KERNEL_H_
+UB：3个State bank，三个bank轮换递推，末token期间向未参与的bank预取下一初态；固定X=8。
+输入、参数和out双缓冲，沿用原偏移与峰值；guard尾部保留512B数值scratch。
 
-#include "kernel_operator.h"
-#include "lib/matmul_intf.h"
-#include "../recurrent_kda_tiling_data.h"
-
+资源 | Mutex份数 | 生命周期与反向依赖
+State访问 | 3 | MTE2初始化、VF源/目标；保护旧VF读完后才覆盖
+State快照 | 3 | MTE2初始化、VF目标、MTE3搬出；VF源读取不持此锁
+输入 | 2 | MTE2搬入、V消费完整tile；下次MTE2覆盖自动等待
+参数 | 2 | MTE2搬入、V消费完整任务
+out | 2 | V生成完整tile、MTE3批量搬出
+共12个ID由AllocMutexID申请，核尾部通过V获取所有资源后ReleaseMutexID。
+tile边界不等待Scalar；各消费流水通过资源Mutex等待生产完成。
+同流水的访存依赖仍使用LocalMemBar/PipeBarrier，不用Mutex替代。
+*/
 namespace RecurrentKda {
-
-using namespace matmul;
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
-constexpr uint64_t BUFFER_NUM = 1;
-constexpr uint64_t INPUT_BUFFER_NUM = 2;
-constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
-constexpr uint64_t MAX_MTP = 8;
-constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
-constexpr uint64_t FP32_NUM_PER_BLOCK = 8;
-constexpr uint32_t REPEAT_LENTH = 64; // 256 bytes for float.
-constexpr uint32_t MAX_REPEAT_TIME = 255;
-constexpr uint32_t ADD_FOLD_REDUCE_MIN_K = 128;
-constexpr uint16_t V_LENGTH = VECTOR_REG_WIDTH / sizeof(float);
-constexpr uint16_t TWO_V_LENGTH = 2 * V_LENGTH;
-constexpr uint64_t INVALID_STATE_SLOT = static_cast<uint64_t>(-1);
-constexpr uint32_t STATE_TRANSPOSE_BLOCK = 16;
-constexpr uint32_t DATA_BLOCK_BYTES = 32;
 
-#ifndef RKDA_ENABLE_ADD_FOLD_REDUCE
-#define RKDA_ENABLE_ADD_FOLD_REDUCE  1
+// 输入：GM地址和host tiling；只接线、预留容量，不提交DMA。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void InitRecurrentKda(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RecurrentKdaTilingData *tiling, const RKDAInitParams &args)
+{
+    ctx.td_ = tiling;
+    ctx.args_ = args;
+    ctx.vfFlags_ = ctx.td_->vfFlags;
+    for (uint32_t i = 0; i < RKDA_MUTEX_COUNT; ++i) ctx.mutex_[i] = AllocMutexID();
+    // Fixed per-specialization UB ownership, without TPipe buffer allocation.
+    ctx.ub_ = LocalTensor<uint8_t>(TPosition::VECCALC, 0, ctx.eventOffset_ + RKDA_GUARD_BYTES_2048);
+    ctx.q_.SetGlobalBuffer((__gm__ inType *)args.query);
+    ctx.k_.SetGlobalBuffer((__gm__ inType *)args.key);
+    ctx.v_.SetGlobalBuffer((__gm__ inType *)args.value);
+    ctx.stateIn_.SetGlobalBuffer((__gm__ stateType *)args.initState);
+    ctx.stateOut_.SetGlobalBuffer((__gm__ stateType *)args.finalState);
+    ctx.out_.SetGlobalBuffer((__gm__ outType *)args.attnOut);
+    ctx.aLog_.SetGlobalBuffer((__gm__ float *)args.aLog);
+    ctx.bias_.SetGlobalBuffer((__gm__ float *)args.dtBias);
+    // Row gaps and widths are invariant for this invocation; only rows change.
+    ctx.queryCopy_ = {0, RKDA_DIM_128 * sizeof(inType),
+        static_cast<uint32_t>((ctx.td_->queryTokenStride - RKDA_DIM_128) * sizeof(inType)), 0, 0};
+    ctx.keyCopy_ = {0, RKDA_DIM_128 * sizeof(inType),
+        static_cast<uint32_t>((ctx.td_->keyTokenStride - RKDA_DIM_128) * sizeof(inType)), 0, 0};
+    ctx.valueCopy_ = {0, RKDA_DIM_128 * sizeof(inType),
+        static_cast<uint32_t>((ctx.td_->valueTokenStride - RKDA_DIM_128) * sizeof(inType)), 0, 0};
+#if defined(DTYPE_GATE) && defined(DTYPE_BETA)
+    constexpr uint32_t gateBytes = sizeof(DTYPE_GATE), betaBytes = sizeof(DTYPE_BETA);
+#else
+    const uint32_t gateBytes = ctx.td_->gateDtype == 0 ? sizeof(float) : sizeof(half);
+    const uint32_t betaBytes = ctx.td_->betaDtype == 0 ? sizeof(float) : sizeof(half);
 #endif
+    ctx.gateCopy_ = {0, RKDA_DIM_128 * gateBytes,
+        (ctx.td_->nv - 1) * RKDA_DIM_128 * gateBytes, 0, 0};
+    ctx.betaCopy_ = {0, betaBytes, (ctx.td_->nv - 1) * betaBytes, 0, 0};
+    ctx.outputCopy_ = {0, RKDA_DIM_128 * sizeof(outType), 0,
+        static_cast<uint32_t>((ctx.td_->nv - 1) * RKDA_DIM_128 * sizeof(outType)), 0};
 
-struct RKDAInitParams {
-    GM_ADDR query;
-    GM_ADDR key;
-    GM_ADDR value;
-    GM_ADDR gate;
-    GM_ADDR beta;
-    GM_ADDR initState;
-    GM_ADDR cuSeqlens;
-    GM_ADDR ssmStateIndices;
-    GM_ADDR aLog;
-    GM_ADDR dtBias;
-    GM_ADDR numAcceptedTokens;
-    GM_ADDR attnOut;
-    GM_ADDR finalState;
-};
 
-template <typename inType, typename outType, typename stateType>
-class RKDA {
-public:
-    __aicore__ inline explicit RKDA(const RecurrentKdaTilingData *tilingData)
-    {
-        B_ = tilingData->b;
-        T_ = tilingData->t;
-        seqLen_ = tilingData->seqLen;
-        NK_ = tilingData->nk;
-        realK_ = tilingData->dk;
-        NV_ = tilingData->nv;
-        realV_ = tilingData->dv;
-        stateCapacity_ = tilingData->sBlockNum;
-        queryTokenStride_ = tilingData->queryTokenStride;
-        queryHeadStride_ = tilingData->queryHeadStride;
-        keyTokenStride_ = tilingData->keyTokenStride;
-        keyHeadStride_ = tilingData->keyHeadStride;
-        valueTokenStride_ = tilingData->valueTokenStride;
-        valueHeadStride_ = tilingData->valueHeadStride;
-        ssmStateStride_ = tilingData->ssmStateStride;
-        stateInStride0_ = tilingData->stateInStride0;
-        stateInStride1_ = tilingData->stateInStride1;
-        stateInStride2_ = tilingData->stateInStride2;
-        stateInStride3_ = tilingData->stateInStride3;
-        stateOutStride0_ = tilingData->stateOutStride0;
-        stateOutStride1_ = tilingData->stateOutStride1;
-        stateOutStride2_ = tilingData->stateOutStride2;
-        stateOutStride3_ = tilingData->stateOutStride3;
-        scale_ = tilingData->scale;
-        lowerBound_ = tilingData->lowerBound;
-        hasCuSeqlens_ = (tilingData->hasCuSeqlens == 1);
-        hasSsmStateIndices_ = (tilingData->hasSsmStateIndices == 1);
-        hasAcceptedTokens_ = (tilingData->hasAcceptedTokens == 1);
-        hasALog_ = (tilingData->hasALog == 1);
-        hasDtBias_ = (tilingData->hasDtBias == 1);
-        useQkL2norm_ = (tilingData->useQkL2norm == 1);
-        useGateInKernel_ = (tilingData->useGateInKernel == 1);
-        useBetaSigmoid_ = (tilingData->useBetaSigmoid == 1);
-        allowNegEigval_ = (tilingData->allowNegEigval == 1);
-        safeGate_ = (tilingData->safeGate == 1);
-        stateVFirst_ = (tilingData->stateVFirst == 1);
-        shouldStoreState_ = (tilingData->inplaceFinalState == 1 || tilingData->outputFinalState == 1);
-        gateDtype_ = tilingData->gateDtype;
-        betaDtype_ = tilingData->betaDtype;
-        cuSeqlensDtype_ = tilingData->cuSeqlensDtype;
-        ssmStateIndicesDtype_ = tilingData->ssmStateIndicesDtype;
-        acceptedTokensDtype_ = tilingData->acceptedTokensDtype;
-        useAddFoldReduce_ = (RKDA_ENABLE_ADD_FOLD_REDUCE != 0);
-        vStep_ = tilingData->vStep;
-        stateOutBufferNum_ = (tilingData->stateOutBufferNum == MAX_OUT_BUFFER_NUM) ? MAX_OUT_BUFFER_NUM : BUFFER_NUM;
-        attnOutBufferNum_ = (tilingData->attnOutBufferNum == MAX_OUT_BUFFER_NUM) ? MAX_OUT_BUFFER_NUM : BUFFER_NUM;
-        restUbSize_ = tilingData->ubRestBytes;
-        alignK_ = Ceil(tilingData->dk, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
-        alignV_ = Ceil(tilingData->dv, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
-        eventMte2ToVInitialized_ = false;
-        eventVToMte2Initialized_ = false;
-        eventVToSInitialized_ = false;
-        eventVToMte3Initialized_ = false;
-        eventMte3ToVInitialized_ = false;
+}
+
+#ifdef RKDA_EXECUTION_TRACE
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaInitExecutionTrace(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, GM_ADDR records)
+{
+    ctx.trace_.SetGlobalBuffer((__gm__ uint64_t *)records + GetBlockIdx() * 32768);
+    ctx.traceCount_ = 0;
+    ctx.trace_.SetValue(0, 0);
+
+}
+
+#endif
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaBeginBanks(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint32_t initial)
+{
+    ctx.initialBank_ = initial;
+    ctx.currentBank_ = initial;
+    ctx.nextBank_ = initial == 2 ? 0 : initial + 1;
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaAdvanceBank(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx)
+{
+    ctx.currentBank_ = ctx.nextBank_;
+    ctx.nextBank_ = ctx.nextBank_ == 2 ? 0 : ctx.nextBank_ + 1;
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline int64_t RecurrentKdaMetadata(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, GM_ADDR address, uint32_t dtype, uint64_t index)
+{
+    if (dtype == 0) {
+        GlobalTensor<int32_t> values;
+        values.SetGlobalBuffer((__gm__ int32_t *)address);
+        return values.GetValue(index);
     }
+    GlobalTensor<int64_t> values;
+    values.SetGlobalBuffer((__gm__ int64_t *)address);
+    return values.GetValue(index);
 
-    __aicore__ inline void Init(const RKDAInitParams &initParams, TPipe *pipe)
-    {
-        uint64_t blockDim = GetBlockNum();
-        blockIdx = GetBlockIdx();
-        if (blockIdx >= blockDim) {
-            return;
-        }
-        pipe_ = pipe;
-        SetGlobalTensors(initParams);
-        InitLocalBuffers();
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline int64_t RecurrentKdaSequence(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint64_t request)
+{
+    return ctx.td_->hasCuSeqlens ? RecurrentKdaMetadata(ctx, ctx.args_.cuSeqlens, ctx.td_->cuSeqlensDtype, request) :
+                               int64_t(request * ctx.td_->seqLen);
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline uint64_t RecurrentKdaSlot(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint64_t request, int64_t begin, int64_t token)
+{
+    if (!ctx.td_->hasSsmStateIndices) return request;
+    const uint64_t offset = ctx.td_->ssmStateStride ?
+        request * ctx.td_->ssmStateStride + uint64_t(token - begin) : uint64_t(token);
+    const int64_t slot = RecurrentKdaMetadata(ctx, ctx.args_.ssmStateIndices, ctx.td_->ssmStateIndicesDtype, offset);
+    return slot >= 0 && uint64_t(slot) < ctx.td_->sBlockNum ? uint64_t(slot) : RKDA_INVALID_SLOT;
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline bool RecurrentKdaValidateSlots(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint64_t request, int64_t begin, int64_t end)
+{
+    if (ctx.td_->hasAcceptedTokens) {
+        int64_t accepted = RecurrentKdaMetadata(ctx, ctx.args_.numAcceptedTokens, ctx.td_->acceptedTokensDtype, request);
+        if (accepted <= 0 || accepted > end - begin) return false;
     }
+    if (!ctx.td_->hasSsmStateIndices) return request < ctx.td_->sBlockNum;
+    for (int64_t token = begin; token < end; ++token)
+        if (RecurrentKdaSlot(ctx, request, begin, token) == RKDA_INVALID_SLOT) return false;
+    return true;
 
-    __aicore__ inline void SetGlobalTensors(const RKDAInitParams &initParams)
-    {
-        queryGm_.SetGlobalBuffer((__gm__ inType *)initParams.query);
-        keyGm_.SetGlobalBuffer((__gm__ inType *)initParams.key);
-        valueGm_.SetGlobalBuffer((__gm__ inType *)initParams.value);
-        gateFloatGm_.SetGlobalBuffer((__gm__ float *)initParams.gate);
-        gateBf16Gm_.SetGlobalBuffer((__gm__ bfloat16_t *)initParams.gate);
-        gateFp16Gm_.SetGlobalBuffer((__gm__ half *)initParams.gate);
-        betaFloatGm_.SetGlobalBuffer((__gm__ float *)initParams.beta);
-        betaBf16Gm_.SetGlobalBuffer((__gm__ bfloat16_t *)initParams.beta);
-        betaFp16Gm_.SetGlobalBuffer((__gm__ half *)initParams.beta);
-        initStateGm_.SetGlobalBuffer((__gm__ stateType *)initParams.initState);
-        cuSeqlensInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.cuSeqlens);
-        cuSeqlensInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.cuSeqlens);
-        ssmStateIndicesInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.ssmStateIndices);
-        ssmStateIndicesInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.ssmStateIndices);
-        aLogGm_.SetGlobalBuffer((__gm__ float *)initParams.aLog);
-        dtBiasGm_.SetGlobalBuffer((__gm__ float *)initParams.dtBias);
-        numAcceptedTokensInt32Gm_.SetGlobalBuffer((__gm__ int32_t *)initParams.numAcceptedTokens);
-        numAcceptedTokensInt64Gm_.SetGlobalBuffer((__gm__ int64_t *)initParams.numAcceptedTokens);
-        finalStateGm_.SetGlobalBuffer((__gm__ stateType *)initParams.finalState);
-        attnOutGm_.SetGlobalBuffer((__gm__ outType *)initParams.attnOut);
-    }
+}
 
-    __aicore__ inline void InitLocalBuffers()
-    {
-        uint32_t cubeSize = alignK_ * vStep_ * sizeof(float);
-        uint32_t singleVSize = vStep_ * sizeof(float);
-        uint32_t vSize = MAX_MTP * alignV_ * sizeof(float);
-        uint32_t kSize = MAX_MTP * alignK_ * sizeof(float);
-        // FP16/BF16 beta rows expand to 16 FP32 values after Cast.
-        uint32_t betaUbSize = MAX_MTP * BF16_NUM_PER_BLOCK * sizeof(float);
-        pipe_->InitBuffer(qInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
-        pipe_->InitBuffer(kInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
-        pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
-        pipe_->InitBuffer(gateInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(float));
-        pipe_->InitBuffer(betaInQueue_, BUFFER_NUM, betaUbSize);
-        pipe_->InitBuffer(stateInQueue_, INPUT_BUFFER_NUM, alignK_ * vStep_ * sizeof(stateType));
-        pipe_->InitBuffer(stateOutQueue_, stateOutBufferNum_, alignK_ * vStep_ * sizeof(stateType));
-        if (!stateVFirst_) {
-            pipe_->InitBuffer(stateTransposeBuf_, alignK_ * vStep_ * sizeof(stateType));
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline bool RecurrentKdaPrepareTask(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint64_t &cursor, RKDATask &task, bool &valid)
+{
+    const uint64_t count = uint64_t(ctx.td_->b) * ctx.td_->nv;
+    while (cursor < count) {
+        const uint64_t id = cursor;
+        cursor += GetBlockNum();
+        const uint64_t request = id / ctx.td_->nv;
+        const int64_t begin = RecurrentKdaSequence(ctx, request);
+        const int64_t end = RecurrentKdaSequence(ctx, request + 1);
+        if (begin == end) continue;
+        if (!RecurrentKdaValidateSlots(ctx, request, begin, end)) {
+            valid = false; return false;
         }
-        pipe_->InitBuffer(attnOutQueue_, attnOutBufferNum_, vStep_ * sizeof(outType));
-        pipe_->InitBuffer(tmpBuff, restUbSize_);
-        pipe_->InitBuffer(scalarBuf_, 64);
-
-        uint32_t buffOffset = 0;
-        deltaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
-        buffOffset += singleVSize;
-        attnInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
-        buffOffset += singleVSize;
-        vInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
-        buffOffset += vSize;
-        qInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize;
-        kInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize;
-        stateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
-        buffOffset += cubeSize;
-        if (alignK_ == TWO_V_LENGTH) {
-            broadTmpInUb = stateInUb;
-        } else {
-            broadTmpInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
-            buffOffset += cubeSize;
-        }
-        betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
-        buffOffset += betaUbSize;
-        gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-    }
-
-    __aicore__ inline void SyncMte2ToV()
-    {
-        if (!eventMte2ToVInitialized_) {
-            eventIdMte2ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE2_V);
-            eventMte2ToVInitialized_ = true;
-        }
-        SetFlag<HardEvent::MTE2_V>(eventIdMte2ToV_);
-        WaitFlag<HardEvent::MTE2_V>(eventIdMte2ToV_);
-    }
-
-    __aicore__ inline void SyncVToMte2()
-    {
-        if (!eventVToMte2Initialized_) {
-            eventIdVToMte2_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE2);
-            eventVToMte2Initialized_ = true;
-        }
-        SetFlag<HardEvent::V_MTE2>(eventIdVToMte2_);
-        WaitFlag<HardEvent::V_MTE2>(eventIdVToMte2_);
-    }
-
-    __aicore__ inline void SyncVToS()
-    {
-        if (!eventVToSInitialized_) {
-            eventIdVToS_ = GetTPipePtr()->FetchEventID(HardEvent::V_S);
-            eventVToSInitialized_ = true;
-        }
-        SetFlag<HardEvent::V_S>(eventIdVToS_);
-        WaitFlag<HardEvent::V_S>(eventIdVToS_);
-    }
-
-    __aicore__ inline void SyncVToMte3()
-    {
-        if (!eventVToMte3Initialized_) {
-            eventIdVToMte3_ = GetTPipePtr()->FetchEventID(HardEvent::V_MTE3);
-            eventVToMte3Initialized_ = true;
-        }
-        SetFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
-        WaitFlag<HardEvent::V_MTE3>(eventIdVToMte3_);
-    }
-
-    __aicore__ inline void SyncMte3ToV()
-    {
-        if (!eventMte3ToVInitialized_) {
-            eventIdMte3ToV_ = GetTPipePtr()->FetchEventID(HardEvent::MTE3_V);
-            eventMte3ToVInitialized_ = true;
-        }
-        SetFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
-        WaitFlag<HardEvent::MTE3_V>(eventIdMte3ToV_);
-    }
-
-    __aicore__ inline void ReleaseEvents()
-    {
-        if (eventMte2ToVInitialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(eventIdMte2ToV_);
-            eventMte2ToVInitialized_ = false;
-        }
-        if (eventVToMte2Initialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE2>(eventIdVToMte2_);
-            eventVToMte2Initialized_ = false;
-        }
-        if (eventVToSInitialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::V_S>(eventIdVToS_);
-            eventVToSInitialized_ = false;
-        }
-        if (eventVToMte3Initialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(eventIdVToMte3_);
-            eventVToMte3Initialized_ = false;
-        }
-        if (eventMte3ToVInitialized_) {
-            GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(eventIdMte3ToV_);
-            eventMte3ToVInitialized_ = false;
-        }
-    }
-
-    __aicore__ inline void Process()
-    {
-        if (!ValidateCuSeqlens()) {
-            ReleaseEvents();
-            return;
-        }
-        uint64_t taskIdx = blockIdx;
-        uint64_t taskNum = B_ * NV_;
-        uint64_t taskStride = GetBlockNum();
-        RKDATaskInfo currentTask{};
-        RKDATaskInfo nextTask{};
-        bool taskValid = true;
-        bool hasCurrentTask = PrepareNextTask(taskIdx, taskNum, taskStride, currentTask, taskValid);
-        bool hasNextTask = PrepareNextTask(taskIdx, taskNum, taskStride, nextTask, taskValid);
-        if (!taskValid) {
-            ReleaseEvents();
-            return;
-        }
-        bool statePrefetched = false;
-        while (hasCurrentTask) {
-            CopyInBeta(currentTask.seq0, currentTask.seq1, currentTask.head);
-            statePrefetched = ProcessHead(
-                currentTask.batch, currentTask.seq0, currentTask.seq1,
-                currentTask.head, currentTask.stateSlot, statePrefetched,
-                hasNextTask, nextTask.stateSlot, nextTask.head);
-            if (!hasNextTask) {
-                break;
-            }
-            currentTask = nextTask;
-            hasNextTask = PrepareNextTask(taskIdx, taskNum, taskStride, nextTask, taskValid);
-            if (!taskValid) {
-                ReleaseEvents();
-                return;
-            }
-        }
-        ReleaseEvents();
-    }
-
-private:
-    struct RKDATaskInfo {
-        uint64_t batch;
-        uint64_t head;
-        uint64_t stateSlot;
-        int64_t seq0;
-        int64_t seq1;
-    };
-
-    __aicore__ inline bool PrepareNextTask(uint64_t &taskIdx, uint64_t taskNum, uint64_t taskStride,
-                                           RKDATaskInfo &task, bool &taskValid)
-    {
-        taskValid = true;
-        while (taskIdx < taskNum) {
-            uint64_t currentTaskIdx = taskIdx;
-            taskIdx += taskStride;
-            uint64_t batch = currentTaskIdx / NV_;
-            int64_t seq0 = SequenceStart(batch);
-            int64_t seq1 = SequenceEnd(batch);
-            int64_t seqLen64 = seq1 - seq0;
-            if (seqLen64 == 0) {
-                continue;
-            }
-            int32_t seqLen = static_cast<int32_t>(seqLen64);
-            if (!ValidateStateSlots(batch, seq0, seqLen)) {
-                taskValid = false;
-                return false;
-            }
-            uint64_t stateSlot = ResolveInitialStateSlot(batch, seq0, seqLen);
-            if (stateSlot == INVALID_STATE_SLOT) {
-                taskValid = false;
-                return false;
-            }
-            task.batch = batch;
-            task.head = currentTaskIdx % NV_;
-            task.stateSlot = stateSlot;
-            task.seq0 = seq0;
-            task.seq1 = seq1;
-            return true;
-        }
-        return false;
-    }
-
-    __aicore__ inline bool ValidateCuSeqlens() const
-    {
-        if (!hasCuSeqlens_) {
-            return seqLen_ <= MAX_MTP;
-        }
-        int64_t seq0 = LoadCuSeqlens(0);
-        if (seq0 != 0) {
-            return false;
-        }
-        for (uint64_t i = 0; i < B_; i++) {
-            int64_t seq1 = LoadCuSeqlens(i + 1);
-            int64_t length = seq1 - seq0;
-            if (seq1 < seq0 || seq1 > static_cast<int64_t>(T_) ||
-                length > static_cast<int64_t>(MAX_MTP) ||
-                (hasSsmStateIndices_ && ssmStateStride_ > 0 && length > ssmStateStride_)) {
-                return false;
-            }
-            seq0 = seq1;
-        }
-        return seq0 <= static_cast<int64_t>(T_);
-    }
-
-    __aicore__ inline int64_t LoadCuSeqlens(uint64_t index) const
-    {
-        return cuSeqlensDtype_ == 0 ? static_cast<int64_t>(cuSeqlensInt32Gm_.GetValue(index)) :
-                                     cuSeqlensInt64Gm_.GetValue(index);
-    }
-
-    __aicore__ inline int64_t SequenceStart(uint64_t batchIdx) const
-    {
-        return hasCuSeqlens_ ? LoadCuSeqlens(batchIdx) : static_cast<int64_t>(batchIdx * seqLen_);
-    }
-
-    __aicore__ inline int64_t SequenceEnd(uint64_t batchIdx) const
-    {
-        return hasCuSeqlens_ ? LoadCuSeqlens(batchIdx + 1) :
-                               static_cast<int64_t>((batchIdx + 1) * seqLen_);
-    }
-
-    __aicore__ inline int64_t LoadSsmStateIndex(uint64_t index) const
-    {
-        return ssmStateIndicesDtype_ == 0 ? static_cast<int64_t>(ssmStateIndicesInt32Gm_.GetValue(index)) :
-                                           ssmStateIndicesInt64Gm_.GetValue(index);
-    }
-
-    __aicore__ inline int64_t LoadAcceptedTokens(uint64_t index) const
-    {
-        return acceptedTokensDtype_ == 0 ? static_cast<int64_t>(numAcceptedTokensInt32Gm_.GetValue(index)) :
-                                          numAcceptedTokensInt64Gm_.GetValue(index);
-    }
-
-    __aicore__ inline uint64_t StateMetadataOffset(uint64_t batchIdx, int64_t seq0, int64_t tokenIdx) const
-    {
-        if (ssmStateStride_ == 0) {
-            return static_cast<uint64_t>(tokenIdx);
-        }
-        return batchIdx * ssmStateStride_ + static_cast<uint64_t>(tokenIdx - seq0);
-    }
-
-    __aicore__ inline uint64_t LoadStateSlot(uint64_t batchIdx, int64_t seq0, int64_t tokenIdx) const
-    {
-        int64_t stateSlot = LoadSsmStateIndex(StateMetadataOffset(batchIdx, seq0, tokenIdx));
-        if (stateSlot < 0 || stateSlot >= static_cast<int64_t>(stateCapacity_)) {
-            return INVALID_STATE_SLOT;
-        }
-        return static_cast<uint64_t>(stateSlot);
-    }
-
-    __aicore__ inline bool ValidateStateSlots(uint64_t batchIdx, int64_t seq0, int32_t seqLen) const
-    {
-        if (!hasSsmStateIndices_) {
-            return batchIdx < stateCapacity_;
-        }
-        if (hasAcceptedTokens_) {
-            int64_t acceptedTokenNum = LoadAcceptedTokens(batchIdx);
-            if (acceptedTokenNum <= 0 || acceptedTokenNum > seqLen) {
-                return false;
-            }
-        }
-        for (int32_t step = 0; step < seqLen; ++step) {
-            if (LoadStateSlot(batchIdx, seq0, seq0 + step) == INVALID_STATE_SLOT) {
-                return false;
-            }
-        }
+        int64_t initialToken = begin;
+        if (ctx.td_->hasAcceptedTokens)
+            initialToken += RecurrentKdaMetadata(ctx, ctx.args_.numAcceptedTokens,
+                ctx.td_->acceptedTokensDtype, request) - 1;
+        const uint64_t initial = RecurrentKdaSlot(ctx, request, begin, initialToken);
+        if (initial == RKDA_INVALID_SLOT) { valid = false; return false; }
+        task = {id, request, id % ctx.td_->nv, begin, end, initial};
         return true;
     }
+    return false;
 
-    __aicore__ inline uint64_t ResolveInitialStateSlot(uint64_t batchIdx, int64_t seq0, int32_t seqLen) const
-    {
-        if (!hasSsmStateIndices_) {
-            return batchIdx;
-        }
-        int64_t tokenIdx = seq0;
-        if (hasAcceptedTokens_) {
-            tokenIdx = seq0 + LoadAcceptedTokens(batchIdx) - 1;
-        }
-        return LoadStateSlot(batchIdx, seq0, tokenIdx);
+}
+
+template <class T,
+          typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaCopyRows(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, GlobalTensor<T> &gm, uint64_t offset, uint64_t stride,
+                                    uint32_t destination, uint32_t width, uint32_t rows,
+                                    uint32_t rowGap = 0)
+{
+    auto local = ctx.ub_[destination].template ReinterpretCast<T>();
+    DataCopyExtParams copy{static_cast<uint16_t>(rows), static_cast<uint32_t>(width * sizeof(T)),
+                           static_cast<uint32_t>((stride - width) * sizeof(T)), rowGap, 0};
+    DataCopyPadExtParams<T> pad{false, 0, 0, 0};
+    DataCopyPad(local, gm[offset], copy, pad);
+
+}
+
+template <class T,
+          typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaCopyInputRows(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx,
+    GlobalTensor<T> &gm, uint64_t offset, uint32_t destination, uint32_t rows, DataCopyExtParams &copy)
+{
+    copy.blockCount = static_cast<uint16_t>(rows);
+    DataCopyPadExtParams<T> pad{false, 0, 0, 0};
+    DataCopyPad(ctx.ub_[destination].template ReinterpretCast<T>(), gm[offset], copy, pad);
+}
+
+template <class T,
+          typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaCopyAux(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, GM_ADDR address, uint64_t head, int64_t token,
+                                   uint32_t slot, uint32_t rows, bool beta)
+{
+    GlobalTensor<T> gm;
+    gm.SetGlobalBuffer((__gm__ T *)address);
+    if (beta) {
+        // MTE2's short rows land at 32-byte intervals, inside ctx.betaSlot_.
+        RecurrentKdaCopyInputRows(ctx, gm, uint64_t(token) * ctx.td_->nv + head,
+                 ctx.betaOffset_ + slot * ctx.betaSlot_, rows, ctx.betaCopy_);
+    } else {
+        RecurrentKdaCopyInputRows(ctx, gm, (uint64_t(token) * ctx.td_->nv + head) * RKDA_DIM_128,
+                 ctx.gateOffset_ + slot * RKDA_ROW_FP32_BYTES_512 * ctx.x_, rows, ctx.gateCopy_);
     }
 
-    template <typename dataType>
-    __aicore__ inline void CopyVectorIn(LocalTensor<dataType> &dst, GlobalTensor<dataType> &src, uint64_t offset,
-                                        uint64_t count)
-    {
-        uint64_t rowBytes = count * sizeof(dataType);
-        if (rowBytes >= 32 && rowBytes % 32 == 0) {
-            DataCopy(dst, src[offset], static_cast<uint32_t>(count));
-        } else {
-            DataCopyParams params{1, static_cast<uint16_t>(rowBytes), 0, 0};
-            DataCopyPadParams padParams{false, 0, 0, 0};
-            DataCopyPad(dst, src[offset], params, padParams);
-        }
-    }
+}
 
-    __aicore__ inline float ReadFloat(GlobalTensor<float> &tensor, uint64_t offset)
-    {
-        LocalTensor<float> scalar = scalarBuf_.Get<float>();
-        DataCopyParams params{1, static_cast<uint16_t>(sizeof(float)), 0, 0};
-        DataCopyPadParams padParams{false, 0, 0, 0};
-        DataCopyPad(scalar, tensor[offset], params, padParams);
-        SyncMte2ToV();
-        Adds(scalar, scalar, 0.0f, 1);
-        PipeBarrier<PIPE_V>();
-        SyncVToS();
-        __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
-        return ptr[0];
-    }
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline uint64_t RecurrentKdaInputOffset(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &task,
+                                         uint64_t token, uint64_t tokenStride, uint64_t batchStride)
+{
+    if (ctx.td_->hasCuSeqlens || ctx.td_->layout == 1) return token * tokenStride;
+    // Task preparation already resolved the request and its first token.
+    // Preserve independent batch strides without dividing the flat token again.
+    return task.request * batchStride + (token - uint64_t(task.begin)) * tokenStride;
 
-    __aicore__ inline float ExpScalar(float x)
-    {
-        LocalTensor<float> scalar = scalarBuf_.Get<float>();
-        Duplicate(scalar, x, 1);
-        PipeBarrier<PIPE_V>();
-        Exp(scalar, scalar, 1);
-        PipeBarrier<PIPE_V>();
-        SyncVToS();
-        __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
-        return ptr[0];
-    }
+}
 
-    __aicore__ inline float SigmoidScalar(float x)
-    {
-        float denom = 1.0f + ExpScalar(-x);
-        return 1.0f / denom;
-    }
-
-    __aicore__ inline void NormalizeRows(LocalTensor<float> &tensor, int32_t seqLen)
-    {
-        for (int32_t row = 0; row < seqLen; ++row) {
-            uint32_t rowOffset = static_cast<uint32_t>(row) * alignK_;
-            Mul(broadTmpInUb, tensor[rowOffset], tensor[rowOffset], alignK_);
-            PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(deltaInUb, broadTmpInUb, 1);
-            PipeBarrier<PIPE_V>();
-            Sqrt(deltaInUb, deltaInUb, 1);
-            PipeBarrier<PIPE_V>();
-            SyncVToS();
-            float norm = deltaInUb.GetValue(0);
-            if (norm > 0.0f) {
-                Muls(tensor[rowOffset], tensor[rowOffset], 1.0f / norm, alignK_);
-                PipeBarrier<PIPE_V>();
-            }
-        }
-    }
-
-    __aicore__ inline void ApplyGateInKernel(uint64_t head, int32_t seqLen)
-    {
-        uint32_t total = static_cast<uint32_t>(seqLen) * alignK_;
-        float expA = hasALog_ ? ExpScalar(ReadFloat(aLogGm_, head)) : 1.0f;
-
-        if (hasDtBias_) {
-            CopyVectorIn(broadTmpInUb, dtBiasGm_, head * realK_, realK_);
-            SyncMte2ToV();
-            for (int32_t row = 0; row < seqLen; ++row) {
-                Add(gateInUb[row * alignK_], gateInUb[row * alignK_], broadTmpInUb, alignK_);
-                PipeBarrier<PIPE_V>();
-            }
-        }
-
-        if (safeGate_) {
-            Muls(gateInUb, gateInUb, expA, total);
-            PipeBarrier<PIPE_V>();
-            Muls(broadTmpInUb, gateInUb, -1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Exp(broadTmpInUb, broadTmpInUb, total);
-            PipeBarrier<PIPE_V>();
-            Adds(broadTmpInUb, broadTmpInUb, 1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Duplicate(gateInUb, 1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Div(gateInUb, gateInUb, broadTmpInUb, total);
-            PipeBarrier<PIPE_V>();
-            Muls(gateInUb, gateInUb, lowerBound_, total);
-            PipeBarrier<PIPE_V>();
-        } else {
-            Exp(gateInUb, gateInUb, total);
-            PipeBarrier<PIPE_V>();
-            Adds(gateInUb, gateInUb, 1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Ln(gateInUb, gateInUb, total);
-            PipeBarrier<PIPE_V>();
-            Muls(gateInUb, gateInUb, -expA, total);
-            PipeBarrier<PIPE_V>();
-        }
-    }
-
-    template <typename gateType>
-    __aicore__ inline void CopyInGate(uint64_t gateOffset, int32_t seqLen)
-    {
-        LocalTensor<gateType> gateLocal = gateInQueue_.AllocTensor<gateType>();
-        Duplicate<gateType>(gateLocal, static_cast<gateType>(0), alignK_ * static_cast<uint32_t>(seqLen));
-        SyncVToMte2();
-        DataCopyExtParams gateInParams{static_cast<uint16_t>(seqLen),
-                                       static_cast<uint32_t>(realK_ * sizeof(gateType)),
-                                       static_cast<uint32_t>((NV_ - 1) * realK_ * sizeof(gateType)), 0, 0};
-        DataCopyPadExtParams<gateType> gatePadParams{
-            true, 0, static_cast<uint8_t>(alignK_ - realK_), static_cast<gateType>(0)};
-        if constexpr (std::is_same<gateType, float32_t>()) {
-            DataCopyPad(gateLocal, gateFloatGm_[gateOffset], gateInParams, gatePadParams);
-        } else if constexpr (std::is_same<gateType, bfloat16_t>()) {
-            DataCopyPad(gateLocal, gateBf16Gm_[gateOffset], gateInParams, gatePadParams);
-        } else {
-            DataCopyPad(gateLocal, gateFp16Gm_[gateOffset], gateInParams, gatePadParams);
-        }
-        gateInQueue_.EnQue<gateType>(gateLocal);
-        gateLocal = gateInQueue_.DeQue<gateType>();
-        if constexpr (std::is_same<gateType, float32_t>()) {
-            Adds(gateInUb, gateLocal, 0.0f, alignK_ * static_cast<uint32_t>(seqLen));
-        } else {
-            Cast(gateInUb, gateLocal, AscendC::RoundMode::CAST_NONE,
-                 alignK_ * static_cast<uint32_t>(seqLen));
-        }
-        gateInQueue_.FreeTensor(gateLocal);
-        PipeBarrier<PIPE_V>();
-    }
-
-    __aicore__ inline void CopyInQKVGate(uint64_t qOffset, uint64_t kOffset, uint64_t vOffset,
-                                         uint64_t gateOffset, int32_t seqLen, uint64_t head)
-    {
-        LocalTensor<inType> qLocal = qInQueue_.AllocTensor<inType>();
-        LocalTensor<inType> kLocal = kInQueue_.AllocTensor<inType>();
-        LocalTensor<inType> vLocal = vInQueue_.AllocTensor<inType>();
-
-        DataCopyExtParams qInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
-                                    static_cast<uint32_t>((queryTokenStride_ - realK_) * sizeof(inType)), 0, 0};
-        DataCopyExtParams kInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
-                                    static_cast<uint32_t>((keyTokenStride_ - realK_) * sizeof(inType)), 0, 0};
-        DataCopyExtParams vInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realV_ * sizeof(inType)),
-                                    static_cast<uint32_t>((valueTokenStride_ - realV_) * sizeof(inType)), 0, 0};
-        DataCopyPadExtParams<inType> qkPadParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
-        DataCopyPadExtParams<inType> vPadParams{true, 0, static_cast<uint8_t>(alignV_ - realV_), 0};
-
-        DataCopyPad(qLocal, queryGm_[qOffset], qInParams, qkPadParams);
-        DataCopyPad(kLocal, keyGm_[kOffset], kInParams, qkPadParams);
-        DataCopyPad(vLocal, valueGm_[vOffset], vInParams, vPadParams);
-        qInQueue_.EnQue<inType>(qLocal);
-        kInQueue_.EnQue<inType>(kLocal);
-        vInQueue_.EnQue<inType>(vLocal);
-        if (gateDtype_ == 0) {
-            CopyInGate<float>(gateOffset, seqLen);
-        } else if (gateDtype_ == 1) {
-            CopyInGate<bfloat16_t>(gateOffset, seqLen);
-        } else {
-            CopyInGate<half>(gateOffset, seqLen);
-        }
-
-        qLocal = qInQueue_.DeQue<inType>();
-        kLocal = kInQueue_.DeQue<inType>();
-        vLocal = vInQueue_.DeQue<inType>();
-        Cast(qInUb, qLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
-        Cast(kInUb, kLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
-        Cast(vInUb, vLocal, AscendC::RoundMode::CAST_NONE, alignV_ * seqLen);
-        AscendC::PipeBarrier<PIPE_V>();
-        if (useQkL2norm_) {
-            NormalizeRows(qInUb, seqLen);
-            NormalizeRows(kInUb, seqLen);
-        }
-        Muls(qInUb, qInUb, scale_, seqLen * alignK_);
-        AscendC::PipeBarrier<PIPE_V>();
-        if (useGateInKernel_) {
-            ApplyGateInKernel(head, seqLen);
-        }
-        Exp(gateInUb, gateInUb, alignK_ * seqLen);
-        AscendC::PipeBarrier<PIPE_V>();
-
-        qInQueue_.FreeTensor(qLocal);
-        kInQueue_.FreeTensor(kLocal);
-        vInQueue_.FreeTensor(vLocal);
-    }
-
-    template <typename transType>
-    __aicore__ inline void TransposeStateMatrixTyped(const LocalTensor<transType> &dst,
-                                                      const LocalTensor<transType> &src,
-                                                      uint32_t rowCount, uint32_t columnCount,
-                                                      uint32_t srcRowStride, uint32_t dstRowStride)
-    {
-        constexpr uint32_t elementsPerBlock = DATA_BLOCK_BYTES / sizeof(transType);
-        uint64_t dstList[STATE_TRANSPOSE_BLOCK];
-        uint64_t srcList[STATE_TRANSPOSE_BLOCK];
-        uint64_t dstAddr = reinterpret_cast<uint64_t>(dst.GetPhyAddr());
-        uint64_t srcAddr = reinterpret_cast<uint64_t>(src.GetPhyAddr());
-        uint16_t repeatTimes = static_cast<uint16_t>(columnCount / elementsPerBlock);
-        TransDataTo5HDParams transposeParams{
-            false, false, static_cast<uint8_t>(repeatTimes),
-            static_cast<uint16_t>(repeatTimes > 1 ? dstRowStride : 0),
-            static_cast<uint16_t>(repeatTimes > 1 ? 1 : 0)};
-        for (uint32_t rowBlock = 0; rowBlock < rowCount; rowBlock += STATE_TRANSPOSE_BLOCK) {
-            for (uint32_t i = 0; i < STATE_TRANSPOSE_BLOCK; ++i) {
-                srcList[i] = srcAddr + (rowBlock + i) * srcRowStride * sizeof(transType);
-                if constexpr (sizeof(transType) == sizeof(float)) {
-                    dstList[i] = dstAddr +
-                        (rowBlock + (i / 2) * dstRowStride + (i % 2) * elementsPerBlock) * sizeof(transType);
-                } else {
-                    dstList[i] = dstAddr + (rowBlock + i * dstRowStride) * sizeof(transType);
-                }
-            }
-            TransDataTo5HD<transType>(dstList, srcList, transposeParams);
-        }
-    }
-
-    __aicore__ inline void TransposeKFirstToVFirst(const LocalTensor<stateType> &dst,
-                                                   const LocalTensor<stateType> &src,
-                                                   uint32_t curSingleV)
-    {
-        if constexpr (std::is_same<stateType, float32_t>()) {
-            TransposeStateMatrixTyped<float>(dst, src, alignK_, curSingleV, vStep_, alignK_);
-        } else {
-            TransposeStateMatrixTyped<uint16_t>(
-                dst.template ReinterpretCast<uint16_t>(), src.template ReinterpretCast<uint16_t>(),
-                alignK_, curSingleV, vStep_, alignK_);
-        }
-    }
-
-    __aicore__ inline void TransposeVFirstToKFirst(const LocalTensor<stateType> &dst,
-                                                   const LocalTensor<stateType> &src,
-                                                   uint32_t curSingleV)
-    {
-        if constexpr (std::is_same<stateType, float32_t>()) {
-            TransposeStateMatrixTyped<float>(dst, src, curSingleV, alignK_, alignK_, vStep_);
-        } else {
-            TransposeStateMatrixTyped<uint16_t>(
-                dst.template ReinterpretCast<uint16_t>(), src.template ReinterpretCast<uint16_t>(),
-                curSingleV, alignK_, alignK_, vStep_);
-        }
-    }
-
-    __aicore__ inline void PrefetchState(uint64_t stateSlot, uint64_t head, uint64_t vOffset,
-                                          uint32_t curSingleV)
-    {
-        LocalTensor<stateType> stateLocal = stateInQueue_.AllocTensor<stateType>();
-        if (stateVFirst_) {
-            uint64_t stateOffset =
-                stateInStride0_ * stateSlot + stateInStride1_ * head + stateInStride2_ * vOffset;
-            DataCopyExtParams stateInParams{static_cast<uint16_t>(curSingleV),
-                                            static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0, 0};
-            DataCopyPadExtParams<stateType> padParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
-            DataCopyPad(stateLocal, initStateGm_[stateOffset], stateInParams, padParams);
-        } else {
-            uint64_t stateOffset = stateInStride0_ * stateSlot + stateInStride1_ * head +
-                                   stateInStride3_ * vOffset;
-            int64_t srcStride = static_cast<int64_t>(
-                (stateInStride2_ - curSingleV) * sizeof(stateType));
-            int64_t dstStride = static_cast<int64_t>(
-                (vStep_ - curSingleV) * sizeof(stateType) / DATA_BLOCK_BYTES);
-            DataCopyExtParams stateInParams{static_cast<uint16_t>(realK_),
-                                            static_cast<uint32_t>(curSingleV * sizeof(stateType)),
-                                            srcStride, dstStride, 0};
-            DataCopyPadExtParams<stateType> padParams{false, 0, 0, 0};
-            DataCopyPad(stateLocal, initStateGm_[stateOffset], stateInParams, padParams);
-        }
-        stateInQueue_.EnQue<stateType>(stateLocal);
-    }
-
-    __aicore__ inline void LoadPrefetchedState(uint32_t curSingleV)
-    {
-        LocalTensor<stateType> stateLocal = stateInQueue_.DeQue<stateType>();
-        if (stateVFirst_) {
-            if constexpr (std::is_same<stateType, float32_t>()) {
-                DataCopy(stateInUb, stateLocal, alignK_ * curSingleV);
-            } else {
-                Cast(stateInUb, stateLocal, AscendC::RoundMode::CAST_NONE, alignK_ * curSingleV);
-            }
-        } else {
-            LocalTensor<stateType> stateTransposeLocal = stateTransposeBuf_.Get<stateType>();
-            TransposeKFirstToVFirst(stateTransposeLocal, stateLocal, curSingleV);
-            PipeBarrier<PIPE_V>();
-            if constexpr (std::is_same<stateType, float32_t>()) {
-                Adds(stateInUb, stateTransposeLocal, 0.0f, alignK_ * curSingleV);
-            } else {
-                Cast(stateInUb, stateTransposeLocal, AscendC::RoundMode::CAST_NONE, alignK_ * curSingleV);
-            }
-        }
-        stateInQueue_.FreeTensor(stateLocal);
-    }
-
-    __aicore__ inline void MatVecMul(const LocalTensor<float> &cubeTensor, const LocalTensor<float> &vecTensor,
-                                          LocalTensor<float> &dstTensor, uint32_t rows)
-    {
-        __ubuf__ float* cubeAddr = (__ubuf__ float*)cubeTensor.GetPhyAddr();
-        __ubuf__ float* vecAddr = (__ubuf__ float*)vecTensor.GetPhyAddr();
-        __ubuf__ float* dstAddr = (__ubuf__ float*)dstTensor.GetPhyAddr();
-
-        uint16_t rowNum = static_cast<uint16_t>(rows);
-        uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(alignK_, V_LENGTH));
-        uint32_t colLength = alignK_;
-        __VEC_SCOPE__
-        {
-            RegTensor<float> cube;
-            RegTensor<float> vec;
-            RegTensor<float> dst;
-            MaskReg pregLoop;
-            for (uint16_t j = 0; j < colLoopTimes; j++) {
-                pregLoop = UpdateMask<float>(colLength);
-                DataCopy(vec, vecAddr + j * V_LENGTH);
-                for (uint16_t i = 0; i < rowNum; i ++) {
-                    DataCopy(cube, cubeAddr + i * alignK_ + j * V_LENGTH);
-                    Mul(dst, cube, vec, pregLoop);
-                    DataCopy(dstAddr + i * alignK_ + j * V_LENGTH, dst, pregLoop);
-                }
-            }
-        }
-    }
-
-    __aicore__ inline void DecayMatVecReduce128(LocalTensor<float> &stateTensor,
-                                                const LocalTensor<float> &gateTensor,
-                                                const LocalTensor<float> &vecTensor,
-                                                LocalTensor<float> &dstTensor, uint32_t rows)
-    {
-        __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
-        __ubuf__ float *gateAddr = (__ubuf__ float *)gateTensor.GetPhyAddr();
-        __ubuf__ float *vecAddr = (__ubuf__ float *)vecTensor.GetPhyAddr();
-        __ubuf__ float *dstAddr = (__ubuf__ float *)dstTensor.GetPhyAddr();
-        uint16_t rowNum = static_cast<uint16_t>(rows);
-        __VEC_SCOPE__
-        {
-            RegTensor<float> state0;
-            RegTensor<float> state1;
-            RegTensor<float> gate0;
-            RegTensor<float> gate1;
-            RegTensor<float> vec0;
-            RegTensor<float> vec1;
-            RegTensor<float> product0;
-            RegTensor<float> product1;
-            RegTensor<float> sum;
-            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
-            DataCopy<float, LoadDist::DIST_DINTLV_B32>(gate0, gate1, gateAddr);
-            DataCopy<float, LoadDist::DIST_DINTLV_B32>(vec0, vec1, vecAddr);
-            for (uint16_t i = 0; i < rowNum; ++i) {
-                DataCopy<float, LoadDist::DIST_DINTLV_B32>(state0, state1, stateAddr + i * alignK_);
-                Mul(state0, state0, gate0, pregFull);
-                Mul(state1, state1, gate1, pregFull);
-                Mul(product0, state0, vec0, pregFull);
-                Mul(product1, state1, vec1, pregFull);
-                Add(product0, product0, product1, pregFull);
-                ReduceSum(sum, product0, pregFull);
-                DataCopy<float, StoreDist::DIST_INTLV_B32>(
-                    stateAddr + i * alignK_, state0, state1, pregFull);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
-            }
-        }
-    }
-
-    __aicore__ inline void ProcessKQ(const LocalTensor<float> &cubeTensor, const LocalTensor<float> &vec1Tensor,
-                                          LocalTensor<float> &dst1Tensor, const LocalTensor<float> &vec2Tensor,
-                                          LocalTensor<float> &dst2Tensor, uint32_t rows)
-    {
-        __ubuf__ float* cubeAddr = (__ubuf__ float*)cubeTensor.GetPhyAddr();
-        __ubuf__ float* vec1Addr = (__ubuf__ float*)vec1Tensor.GetPhyAddr();
-        __ubuf__ float* vec2Addr = (__ubuf__ float*)vec2Tensor.GetPhyAddr();
-        __ubuf__ float* dst1Addr = (__ubuf__ float*)dst1Tensor.GetPhyAddr();
-        __ubuf__ float* dst2Addr = (__ubuf__ float*)dst2Tensor.GetPhyAddr();
-
-        uint16_t rowNum = static_cast<uint16_t>(rows);
-        uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(alignK_, V_LENGTH));
-        uint32_t colLength = alignK_;
-        __VEC_SCOPE__
-        {
-            RegTensor<float> cube;
-            RegTensor<float> vec1;
-            RegTensor<float> vec2;
-            RegTensor<float> dst1;
-            RegTensor<float> dst2;
-            MaskReg pregLoop;
-            for (uint16_t j = 0; j < colLoopTimes; j++) {
-                pregLoop = UpdateMask<float>(colLength);
-                DataCopy(vec1, vec1Addr + j * V_LENGTH);
-                DataCopy(vec2, vec2Addr + j * V_LENGTH);
-                for (uint16_t i = 0; i < rowNum; i ++) {
-                    DataCopy<float, LoadDist::DIST_BRC_B32>(cube, cubeAddr + i);
-                    DataCopy(dst1, dst1Addr + i * alignK_ + j * V_LENGTH);
-                    Mul(cube, cube, vec1, pregLoop);
-                    Add(dst1, dst1, cube, pregLoop);
-                    Mul(dst2, dst1, vec2, pregLoop);
-                    DataCopy(dst1Addr + i * alignK_ + j * V_LENGTH, dst1, pregLoop);
-                    DataCopy(dst2Addr + i * alignK_ + j * V_LENGTH, dst2, pregLoop);
-                }
-            }
-        }
-    }
-
-    template <bool useSigmoid, bool allowNeg>
-    __aicore__ inline void ProcessDeltaKQReduce128(const LocalTensor<float> &dotTensor,
-                                                   const LocalTensor<float> &vTensor,
-                                                   const LocalTensor<float> &betaTensor,
-                                                   uint64_t betaOffset,
-                                                   const LocalTensor<float> &kTensor,
-                                                   LocalTensor<float> &stateTensor,
-                                                   const LocalTensor<float> &qTensor,
-                                                   LocalTensor<float> &attnTensor, uint32_t rows)
-    {
-        __ubuf__ float *dotAddr = (__ubuf__ float *)dotTensor.GetPhyAddr();
-        __ubuf__ float *vAddr = (__ubuf__ float *)vTensor.GetPhyAddr();
-        uint64_t betaRowStride =
-            betaDtype_ == 0 ? FP32_NUM_PER_BLOCK : BF16_NUM_PER_BLOCK;
-        __ubuf__ float *betaAddr = (__ubuf__ float *)betaTensor.GetPhyAddr() + betaOffset * betaRowStride;
-        __ubuf__ float *kAddr = (__ubuf__ float *)kTensor.GetPhyAddr();
-        __ubuf__ float *stateAddr = (__ubuf__ float *)stateTensor.GetPhyAddr();
-        __ubuf__ float *qAddr = (__ubuf__ float *)qTensor.GetPhyAddr();
-        __ubuf__ float *attnAddr = (__ubuf__ float *)attnTensor.GetPhyAddr();
-        uint16_t rowNum = static_cast<uint16_t>(rows);
-        __VEC_SCOPE__
-        {
-            RegTensor<float> delta;
-            RegTensor<float> value;
-            RegTensor<float> beta;
-            RegTensor<float> k0;
-            RegTensor<float> k1;
-            RegTensor<float> q0;
-            RegTensor<float> q1;
-            RegTensor<float> state0;
-            RegTensor<float> state1;
-            RegTensor<float> update;
-            RegTensor<float> dot0;
-            RegTensor<float> dot1;
-            RegTensor<float> sum;
-            RegTensor<float> one;
-            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
-            DataCopy<float, LoadDist::DIST_BRC_B32>(beta, betaAddr);
-            if constexpr (useSigmoid) {
-                Muls(beta, beta, -1.0f, pregFull);
-                Exp(beta, beta, pregFull);
-                Adds(beta, beta, 1.0f, pregFull);
-                Duplicate(one, 1.0f);
-                Div(beta, one, beta, pregFull);
-                if constexpr (allowNeg) {
-                    Muls(beta, beta, 2.0f, pregFull);
-                }
-            }
-            DataCopy<float, LoadDist::DIST_DINTLV_B32>(k0, k1, kAddr);
-            DataCopy<float, LoadDist::DIST_DINTLV_B32>(q0, q1, qAddr);
-            for (uint16_t i = 0; i < rowNum; ++i) {
-                DataCopy<float, LoadDist::DIST_BRC_B32>(delta, dotAddr + i);
-                DataCopy<float, LoadDist::DIST_BRC_B32>(value, vAddr + i);
-                Sub(delta, value, delta, pregFull);
-                Mul(delta, delta, beta, pregFull);
-                DataCopy<float, LoadDist::DIST_DINTLV_B32>(state0, state1, stateAddr + i * alignK_);
-                Mul(update, delta, k0, pregFull);
-                Add(state0, state0, update, pregFull);
-                Mul(dot0, state0, q0, pregFull);
-
-                Mul(update, delta, k1, pregFull);
-                Add(state1, state1, update, pregFull);
-                Mul(dot1, state1, q1, pregFull);
-
-                Add(dot0, dot0, dot1, pregFull);
-                ReduceSum(sum, dot0, pregFull);
-                DataCopy<float, StoreDist::DIST_INTLV_B32>(
-                    stateAddr + i * alignK_, state0, state1, pregFull);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + i, sum, pregFull);
-            }
-        }
-    }
-
-    __aicore__ inline void ProcessDeltaKQReduce128Dispatch(const LocalTensor<float> &dotTensor,
-                                                           const LocalTensor<float> &vTensor,
-                                                           const LocalTensor<float> &betaTensor,
-                                                           uint64_t betaOffset,
-                                                           const LocalTensor<float> &kTensor,
-                                                           LocalTensor<float> &stateTensor,
-                                                           const LocalTensor<float> &qTensor,
-                                                           LocalTensor<float> &attnTensor, uint32_t rows)
-    {
-        if (useBetaSigmoid_) {
-            if (allowNegEigval_) {
-                ProcessDeltaKQReduce128<true, true>(
-                    dotTensor, vTensor, betaTensor, betaOffset, kTensor,
-                    stateTensor, qTensor, attnTensor, rows);
-            } else {
-                ProcessDeltaKQReduce128<true, false>(
-                    dotTensor, vTensor, betaTensor, betaOffset, kTensor,
-                    stateTensor, qTensor, attnTensor, rows);
-            }
-        } else {
-            ProcessDeltaKQReduce128<false, false>(
-                dotTensor, vTensor, betaTensor, betaOffset, kTensor,
-                stateTensor, qTensor, attnTensor, rows);
-        }
-    }
-
-    __aicore__ inline void ReduceSum64(__ubuf__ float* dstAddr, __ubuf__ float* srcAddr, uint16_t rowNum)
-    {
-        uint32_t colLength = alignK_;
-        __VEC_SCOPE__
-        {
-            RegTensor<float> src;
-            RegTensor<float> sum;
-            MaskReg pregLoop = UpdateMask<float>(colLength);
-            for (uint16_t i = 0;i < rowNum;i ++) {
-                DataCopy(src, srcAddr + i * alignK_);
-                ReduceSum(sum, src, pregLoop);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregLoop);
-            }
-        }
-    }
-
-    __aicore__ inline void ReduceSum128(__ubuf__ float* dstAddr, __ubuf__ float* srcAddr, uint16_t rowNum)
-    {
-        uint32_t colLength = alignK_ - V_LENGTH;
-        __VEC_SCOPE__
-        {
-            RegTensor<float> src1;
-            RegTensor<float> src2;
-            RegTensor<float> sum;
-            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
-            MaskReg pregLoop = UpdateMask<float>(colLength);
-            for (uint16_t i = 0;i < rowNum;i ++) {
-                DataCopy(src1, srcAddr + i * alignK_);
-                DataCopy(src2, srcAddr + i * alignK_ + V_LENGTH);
-                Add<float, MaskMergeMode::MERGING>(src1, src1, src2, pregLoop);
-                ReduceSum(sum, src1, pregFull);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
-            }
-        }
-    }
-
-    __aicore__ inline void ReduceSumVF(__ubuf__ float* dstAddr, __ubuf__ float* srcAddr, uint16_t rowNum)
-    {
-        uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(alignK_, V_LENGTH));
-        __VEC_SCOPE__
-        {
-            RegTensor<float> src;
-            RegTensor<float> tmp;
-            RegTensor<float> sum;
-            MaskReg pregFull = CreateMask<float, MaskPattern::ALL>();
-            MaskReg pregLoop;
-            for (uint16_t i = 0;i < rowNum;i ++) {
-                uint32_t colLength = alignK_;
-                Duplicate(tmp, 0.0f);
-                for (uint16_t j = 0; j < colLoopTimes; j++) {
-                    pregLoop = UpdateMask<float>(colLength);
-                    DataCopy(src, srcAddr + i * alignK_ + j * V_LENGTH);
-                    Add<float, MaskMergeMode::MERGING>(tmp, tmp, src, pregLoop);
-                }
-                ReduceSum(sum, tmp, pregFull);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr + i, sum, pregFull);
-            }
-        }
-    }
-
-    __aicore__ inline void ReduceSumDispatch(LocalTensor<float> &dstTensor, LocalTensor<float> &srcTensor,
-                                             uint32_t rows)
-    {
-        __ubuf__ float* srcAddr = (__ubuf__ float*)srcTensor.GetPhyAddr();
-        __ubuf__ float* dstAddr = (__ubuf__ float*)dstTensor.GetPhyAddr();
-        uint16_t rowNum = static_cast<uint16_t>(rows);
-        if (alignK_ <= V_LENGTH) {
-            ReduceSum64(dstAddr, srcAddr, rowNum);
-        } else if (alignK_ <= TWO_V_LENGTH) {
-            ReduceSum128(dstAddr, srcAddr, rowNum);
-        } else {
-            ReduceSumVF(dstAddr, srcAddr, rowNum);
-        }
-    }
-
-    __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset,
-                                   uint64_t curVOffset, uint64_t betaOffset)
-    {
-        if (alignK_ == TWO_V_LENGTH) {
-            DecayMatVecReduce128(stateInUb, gateInUb[curQKOffset],
-                                 kInUb[curQKOffset], deltaInUb, curSingleV);
-        } else {
-            MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-        if (alignK_ == TWO_V_LENGTH) {
-            ProcessDeltaKQReduce128Dispatch(deltaInUb, vInUb[curVOffset],
-                                    betaInUb, betaOffset, kInUb[curQKOffset], stateInUb,
-                                    qInUb[curQKOffset], attnInUb, curSingleV);
-        } else {
-            Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            Muls(deltaInUb, deltaInUb, beta_, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            ProcessKQ(deltaInUb, kInUb[curQKOffset], stateInUb,
-                      qInUb[curQKOffset], broadTmpInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
-        }
-        LocalTensor<outType> attnOutLocal = attnOutQueue_.AllocTensor<outType>();
-        if (shouldStoreState_) {
-            LocalTensor<stateType> stateOutLocal = stateOutQueue_.AllocTensor<stateType>();
-            if constexpr (std::is_same<stateType, float32_t>()) {
-                DataCopy(stateOutLocal, stateInUb, alignK_ * curSingleV);
-            } else {
-                Cast(stateOutLocal, stateInUb, AscendC::RoundMode::CAST_RINT, alignK_ * curSingleV);
-            }
-            stateOutQueue_.EnQue<stateType>(stateOutLocal);
-        }
-        Cast(attnOutLocal, attnInUb, AscendC::RoundMode::CAST_RINT, curSingleV);
-        attnOutQueue_.EnQue<outType>(attnOutLocal);
-    }
-
-    __aicore__ inline void CopyOutAttn(uint64_t attnOffset, uint32_t curSingleV)
-    {
-        LocalTensor<outType> attnLocal = attnOutQueue_.DeQue<outType>();
-        DataCopyParams attnOutParams{1, static_cast<uint16_t>(curSingleV * sizeof(outType)), 0, 0};
-        DataCopyPad(attnOutGm_[attnOffset], attnLocal, attnOutParams);
-        attnOutQueue_.FreeTensor(attnLocal);
-    }
-
-    __aicore__ inline void CopyOutState(uint64_t stateSlot, uint64_t head, uint64_t vOffset,
-                                         uint32_t curSingleV)
-    {
-        LocalTensor<stateType> stateOutLocal = stateOutQueue_.DeQue<stateType>();
-        if (stateVFirst_) {
-            uint64_t stateOffset =
-                stateOutStride0_ * stateSlot + stateOutStride1_ * head + stateOutStride2_ * vOffset;
-            DataCopyParams stateOutParams{static_cast<uint16_t>(curSingleV),
-                                          static_cast<uint16_t>(realK_ * sizeof(stateType)), 0, 0};
-            DataCopyPad(finalStateGm_[stateOffset], stateOutLocal, stateOutParams);
-        } else {
-            LocalTensor<stateType> stateTransposeLocal = stateTransposeBuf_.Get<stateType>();
-            TransposeVFirstToKFirst(stateTransposeLocal, stateOutLocal, curSingleV);
-            SyncVToMte3();
-            uint64_t stateOffset = stateOutStride0_ * stateSlot + stateOutStride1_ * head +
-                                   stateOutStride3_ * vOffset;
-            int64_t srcStride = static_cast<int64_t>(
-                (vStep_ - curSingleV) * sizeof(stateType) / DATA_BLOCK_BYTES);
-            int64_t dstStride = static_cast<int64_t>(
-                (stateOutStride2_ - curSingleV) * sizeof(stateType));
-            DataCopyExtParams stateOutParams{static_cast<uint16_t>(realK_),
-                                             static_cast<uint32_t>(curSingleV * sizeof(stateType)),
-                                             srcStride, dstStride, 0};
-            DataCopyPad(finalStateGm_[stateOffset], stateTransposeLocal, stateOutParams);
-            SyncMte3ToV();
-        }
-        stateOutQueue_.FreeTensor(stateOutLocal);
-    }
-
-    template <typename betaType>
-    __aicore__ inline void CopyInBetaTyped(int64_t seq0, int64_t seq1, uint64_t head)
-    {
-        int64_t seqLen = seq1 - seq0;
-        constexpr uint64_t betaRowStride = 32 / sizeof(betaType);
-        uint64_t betaCount = static_cast<uint64_t>(seqLen) * betaRowStride;
-        LocalTensor<betaType> betaLocal = betaInQueue_.AllocTensor<betaType>();
-        DataCopyExtParams betaInParams{
-            static_cast<uint16_t>(seqLen), static_cast<uint32_t>(sizeof(betaType)),
-            static_cast<uint32_t>((NV_ - 1) * sizeof(betaType)), 0, 0};
-        DataCopyPadExtParams<betaType> betaPadParams{
-            true, 0, static_cast<uint8_t>(betaRowStride - 1), static_cast<betaType>(0)};
-        uint64_t betaOffset = static_cast<uint64_t>(seq0) * NV_ + head;
-        if constexpr (std::is_same<betaType, float32_t>()) {
-            DataCopyPad(betaLocal, betaFloatGm_[betaOffset], betaInParams, betaPadParams);
-        } else if constexpr (std::is_same<betaType, bfloat16_t>()) {
-            DataCopyPad(betaLocal, betaBf16Gm_[betaOffset], betaInParams, betaPadParams);
-        } else {
-            DataCopyPad(betaLocal, betaFp16Gm_[betaOffset], betaInParams, betaPadParams);
-        }
-        betaInQueue_.EnQue<betaType>(betaLocal);
-        betaLocal = betaInQueue_.DeQue<betaType>();
-        if constexpr (std::is_same<betaType, float32_t>()) {
-            Adds(betaInUb, betaLocal, 0.0f, static_cast<uint32_t>(betaCount));
-        } else {
-            Cast(betaInUb, betaLocal, AscendC::RoundMode::CAST_NONE, static_cast<uint32_t>(betaCount));
-        }
-        betaInQueue_.FreeTensor(betaLocal);
-        PipeBarrier<PIPE_V>();
-        if (alignK_ != TWO_V_LENGTH) {
-            SyncVToS();
-        }
-    }
-
-    __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1, uint64_t head)
-    {
-        if (betaDtype_ == 0) {
-            CopyInBetaTyped<float>(seq0, seq1, head);
-        } else if (betaDtype_ == 1) {
-            CopyInBetaTyped<bfloat16_t>(seq0, seq1, head);
-        } else {
-            CopyInBetaTyped<half>(seq0, seq1, head);
-        }
-    }
-
-    __aicore__ inline uint64_t StateSlotForToken(uint64_t batchIdx, int64_t seq0, int64_t tokenIdx) const
-    {
-        if (hasSsmStateIndices_) {
-            return LoadStateSlot(batchIdx, seq0, tokenIdx);
-        }
-        return batchIdx;
-    }
-
-    __aicore__ inline float LoadBeta(uint64_t tokenOffset)
-    {
-        uint64_t betaRowStride =
-            betaDtype_ == 0 ? FP32_NUM_PER_BLOCK : BF16_NUM_PER_BLOCK;
-        float beta = betaInUb.GetValue(tokenOffset * betaRowStride);
-        if (useBetaSigmoid_) {
-            beta = SigmoidScalar(beta);
-            if (allowNegEigval_) {
-                beta *= 2.0f;
-            }
-        }
-        return beta;
-    }
-
-    __aicore__ inline bool ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
-                                      uint64_t head_i, uint64_t stateSlot, bool statePrefetched,
-                                      bool hasNextTask, uint64_t nextStateSlot, uint64_t nextHead)
-    {
-        uint64_t qkHead = head_i / (NV_ / NK_);
-        uint64_t qOffset = static_cast<uint64_t>(seq0) * queryTokenStride_ + qkHead * queryHeadStride_;
-        uint64_t kOffset = static_cast<uint64_t>(seq0) * keyTokenStride_ + qkHead * keyHeadStride_;
-        uint64_t vOffset = static_cast<uint64_t>(seq0) * valueTokenStride_ + head_i * valueHeadStride_;
-        uint64_t gateOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realK_;
-        CopyInQKVGate(
-            qOffset, kOffset, vOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
-        if (realV_ == 0) {
-            return false;
-        }
-        uint64_t nextVOffset = statePrefetched ? vStep_ : 0;
-        uint32_t queuedBufferNum = statePrefetched ? 1 : 0;
-        for (uint32_t bufferIdx = queuedBufferNum;
-             bufferIdx < INPUT_BUFFER_NUM && nextVOffset < realV_; ++bufferIdx) {
-            uint32_t nextSingleV =
-                nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-            PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
-            nextVOffset += vStep_;
-        }
-        bool nextStatePrefetched = false;
-        for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
-            uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
-            LoadPrefetchedState(curSingleV);
-            if (nextVOffset < realV_) {
-                uint32_t nextSingleV =
-                    nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-                PrefetchState(stateSlot, head_i, nextVOffset, nextSingleV);
-                nextVOffset += vStep_;
-            } else if (hasNextTask && !nextStatePrefetched) {
-                uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-                PrefetchState(nextStateSlot, nextHead, 0, nextSingleV);
-                nextStatePrefetched = true;
-            }
-            uint64_t pendingAttnOffset = 0;
-            uint64_t pendingStateSlot = 0;
-            bool hasPendingAttn = false;
-            bool hasPendingState = false;
-            for (int64_t seq_i = seq0; seq_i < seq1; seq_i++) {
-                uint64_t betaOffset = static_cast<uint64_t>(seq_i - seq0);
-                uint64_t curQKOffset = static_cast<uint64_t>(seq_i - seq0) * alignK_;
-                uint64_t curVOffset = static_cast<uint64_t>(seq_i - seq0) * alignV_ + v_i;
-                uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
-                uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
-                uint64_t curStateOutSlot = curStateSlot;
-                if (alignK_ != TWO_V_LENGTH) {
-                    beta_ = LoadBeta(betaOffset);
-                }
-                Compute(curSingleV, curQKOffset, curVOffset, betaOffset);
-                if (attnOutBufferNum_ == BUFFER_NUM) {
-                    CopyOutAttn(attnOffset, curSingleV);
-                } else {
-                    if (hasPendingAttn) {
-                        CopyOutAttn(pendingAttnOffset, curSingleV);
-                    }
-                    pendingAttnOffset = attnOffset;
-                    hasPendingAttn = true;
-                }
-                if (shouldStoreState_) {
-                    if (stateOutBufferNum_ == BUFFER_NUM) {
-                        CopyOutState(curStateOutSlot, head_i, v_i, curSingleV);
-                    } else {
-                        if (hasPendingState) {
-                            CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
-                        }
-                        pendingStateSlot = curStateOutSlot;
-                        hasPendingState = true;
-                    }
-                }
-            }
-            if (hasPendingAttn) {
-                CopyOutAttn(pendingAttnOffset, curSingleV);
-            }
-            if (hasPendingState) {
-                CopyOutState(pendingStateSlot, head_i, v_i, curSingleV);
-            }
-        }
-        return nextStatePrefetched;
-     }
-
-private:
-    GlobalTensor<inType> queryGm_;
-    GlobalTensor<inType> keyGm_;
-    GlobalTensor<inType> valueGm_;
-    GlobalTensor<float> gateFloatGm_;
-    GlobalTensor<bfloat16_t> gateBf16Gm_;
-    GlobalTensor<half> gateFp16Gm_;
-    GlobalTensor<float> betaFloatGm_;
-    GlobalTensor<bfloat16_t> betaBf16Gm_;
-    GlobalTensor<half> betaFp16Gm_;
-    GlobalTensor<stateType> initStateGm_;
-    GlobalTensor<int32_t> cuSeqlensInt32Gm_;
-    GlobalTensor<int64_t> cuSeqlensInt64Gm_;
-    GlobalTensor<int32_t> ssmStateIndicesInt32Gm_;
-    GlobalTensor<int64_t> ssmStateIndicesInt64Gm_;
-    GlobalTensor<float> aLogGm_;
-    GlobalTensor<float> dtBiasGm_;
-    GlobalTensor<int32_t> numAcceptedTokensInt32Gm_;
-    GlobalTensor<int64_t> numAcceptedTokensInt64Gm_;
-    GlobalTensor<stateType> finalStateGm_;
-    GlobalTensor<outType> attnOutGm_;
-    TPipe *pipe_;
-    TQue<QuePosition::VECIN, 1> qInQueue_;
-    TQue<QuePosition::VECIN, 1> kInQueue_;
-    TQue<QuePosition::VECIN, 1> vInQueue_;
-    TQue<QuePosition::VECIN, 1> gateInQueue_;
-    TQue<QuePosition::VECIN, 1> betaInQueue_;
-    TQue<QuePosition::VECIN, INPUT_BUFFER_NUM> stateInQueue_;
-    TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> attnOutQueue_;
-    TQue<QuePosition::VECOUT, MAX_OUT_BUFFER_NUM> stateOutQueue_;
-    TBuf<TPosition::VECCALC> tmpBuff;
-    TBuf<TPosition::VECCALC> stateTransposeBuf_;
-    TBuf<TPosition::VECCALC> scalarBuf_;
-    LocalTensor<float> qInUb;
-    LocalTensor<float> kInUb;
-    LocalTensor<float> vInUb;
-    LocalTensor<float> gateInUb;
-    LocalTensor<float> betaInUb;
-    LocalTensor<float> deltaInUb;
-    LocalTensor<float> broadTmpInUb;
-    LocalTensor<float> attnInUb;
-    LocalTensor<float> stateInUb;
-    TEventID eventIdMte2ToV_;
-    TEventID eventIdVToMte2_;
-    TEventID eventIdVToS_;
-    TEventID eventIdVToMte3_;
-    TEventID eventIdMte3ToV_;
-    bool eventMte2ToVInitialized_;
-    bool eventVToMte2Initialized_;
-    bool eventVToSInitialized_;
-    bool eventVToMte3Initialized_;
-    bool eventMte3ToVInitialized_;
-    uint32_t B_;
-    uint32_t T_;
-    uint32_t seqLen_;
-    uint32_t NK_;
-    uint32_t alignK_;
-    uint32_t realK_;
-    uint32_t NV_;
-    uint32_t alignV_;
-    uint32_t realV_;
-    uint32_t stateCapacity_;
-    uint32_t ssmStateStride_;
-    uint64_t queryTokenStride_;
-    uint64_t queryHeadStride_;
-    uint64_t keyTokenStride_;
-    uint64_t keyHeadStride_;
-    uint64_t valueTokenStride_;
-    uint64_t valueHeadStride_;
-    uint64_t stateInStride0_;
-    uint64_t stateInStride1_;
-    uint64_t stateInStride2_;
-    uint64_t stateInStride3_;
-    uint64_t stateOutStride0_;
-    uint64_t stateOutStride1_;
-    uint64_t stateOutStride2_;
-    uint64_t stateOutStride3_;
-    uint32_t vStep_;
-    uint32_t stateOutBufferNum_;
-    uint32_t attnOutBufferNum_;
-    uint32_t restUbSize_;
-    uint32_t gateDtype_;
-    uint32_t betaDtype_;
-    uint32_t cuSeqlensDtype_;
-    uint32_t ssmStateIndicesDtype_;
-    uint32_t acceptedTokensDtype_;
-    bool hasCuSeqlens_;
-    bool hasSsmStateIndices_;
-    bool hasAcceptedTokens_;
-    bool hasALog_;
-    bool hasDtBias_;
-    bool useQkL2norm_;
-    bool useGateInKernel_;
-    bool useBetaSigmoid_;
-    bool allowNegEigval_;
-    bool safeGate_;
-    bool stateVFirst_;
-    bool shouldStoreState_;
-    bool useAddFoldReduce_;
-    float beta_;
-    float scale_;
-    float lowerBound_;
-    uint64_t blockIdx;
-};
-} // namespace RecurrentKda
+// 输入：当前tile的GM输入
+// 输出：指定UB输入槽。
+// 复用：覆盖前由编排层回收slot
+// 同步：输入槽Mutex由MTE2交给Vector。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage0PrefetchInputs(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &task,
+                                         int64_t token, uint32_t rows, uint32_t slot)
+{
+    Mutex::Lock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_INPUT + slot]);
+    const uint64_t head = task.head;
+    const uint64_t hk = head / ctx.td_->headRatio;
+    RecurrentKdaCopyInputRows(ctx, ctx.q_, RecurrentKdaInputOffset(ctx, task, uint64_t(token), ctx.td_->queryTokenStride, ctx.td_->queryBatchStride) + hk * ctx.td_->queryHeadStride,
+             ctx.qOffset_ + slot * RKDA_ROW_BF16_BYTES_256 * ctx.x_, rows, ctx.queryCopy_);
+    RecurrentKdaCopyInputRows(ctx, ctx.k_, RecurrentKdaInputOffset(ctx, task, uint64_t(token), ctx.td_->keyTokenStride, ctx.td_->keyBatchStride) + hk * ctx.td_->keyHeadStride,
+             ctx.kOffset_ + slot * RKDA_ROW_BF16_BYTES_256 * ctx.x_, rows, ctx.keyCopy_);
+    RecurrentKdaCopyInputRows(ctx, ctx.v_, RecurrentKdaInputOffset(ctx, task, uint64_t(token), ctx.td_->valueTokenStride, ctx.td_->valueBatchStride) + head * ctx.td_->valueHeadStride,
+             ctx.vOffset_ + slot * RKDA_ROW_BF16_BYTES_256 * ctx.x_, rows, ctx.valueCopy_);
+#if defined(DTYPE_GATE) && defined(DTYPE_BETA)
+    // The OPP binary's input types also determine the DMA width and strides.
+    RecurrentKdaCopyAux<DTYPE_GATE>(ctx, ctx.args_.gate, head, token, slot, rows, false);
+    RecurrentKdaCopyAux<DTYPE_BETA>(ctx, ctx.args_.beta, head, token, slot, rows, true);
+#else
+    if (ctx.td_->gateDtype == 0) RecurrentKdaCopyAux<float>(ctx, ctx.args_.gate, head, token, slot, rows, false);
+    else if (ctx.td_->gateDtype == 1) RecurrentKdaCopyAux<bfloat16_t>(ctx, ctx.args_.gate, head, token, slot, rows, false);
+    else RecurrentKdaCopyAux<half>(ctx, ctx.args_.gate, head, token, slot, rows, false);
+    if (ctx.td_->betaDtype == 0) RecurrentKdaCopyAux<float>(ctx, ctx.args_.beta, head, token, slot, rows, true);
+    else if (ctx.td_->betaDtype == 1) RecurrentKdaCopyAux<bfloat16_t>(ctx, ctx.args_.beta, head, token, slot, rows, true);
+    else RecurrentKdaCopyAux<half>(ctx, ctx.args_.beta, head, token, slot, rows, true);
 #endif
+    Mutex::Unlock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_INPUT + slot]);
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline uint32_t RecurrentKdaValidTokens(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, int64_t begin, int64_t end)
+{
+    return uint64_t(end - begin) < ctx.x_ ? uint32_t(end - begin) : ctx.x_;
+
+}
+
+// 输入：完整tile的UB out
+// 输出：GM out。
+// 复用：完成前保持源slot
+// 同步：out槽Mutex保护Vector生产、MTE3消费和再次覆盖。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage2WriteOutputTile(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, int64_t token, uint32_t rows, uint64_t head, uint32_t slot)
+{
+    Mutex::Lock<PIPE_MTE3>(ctx.mutex_[RKDA_MUTEX_OUT + slot]);
+    // UB rows are contiguous; GM rows for one value head are Nv rows apart.
+    ctx.outputCopy_.blockCount = static_cast<uint16_t>(rows);
+    DataCopyPad(ctx.out_[(uint64_t(token) * ctx.td_->nv + head) * RKDA_DIM_128],
+                ctx.ub_[ctx.outOffset_ + slot * ctx.x_ * RKDA_ROW_BF16_BYTES_256].template ReinterpretCast<outType>(), ctx.outputCopy_);
+    Mutex::Unlock<PIPE_MTE3>(ctx.mutex_[RKDA_MUTEX_OUT + slot]);
+
+}
+
+// 输入：任务初态
+// 输出：指定bank。
+// 复用：只写可用bank
+// 同步：State访问/快照Mutex保护初始化。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage0PrefetchState(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &task, uint32_t bank)
+{
+    using StateLayout = RegBase::StateLayout<stateType, stateVFirst>;
+    constexpr uint32_t BANK = StateLayout::BYTES;
+    Mutex::Lock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_STATE_USE + bank]);
+    Mutex::Lock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + bank]);
+    const uint64_t initial = task.initialSlot;
+    RecurrentKdaCopyRows(ctx, ctx.stateIn_, initial * ctx.td_->stateInStride0 + task.head * ctx.td_->stateInStride1,
+             ctx.td_->stateInStride2, bank * BANK, RKDA_DIM_128, RKDA_DIM_128, StateLayout::ROW_GAP);
+    Mutex::Unlock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + bank]);
+    Mutex::Unlock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_STATE_USE + bank]);
+
+}
+
+// 参数槽独立于State bank，在当前任务首token提交下一任务参数，
+// 避免参数搬入排在末token的State bank等待之后。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage0PrefetchParameters(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &task, uint32_t parameterSlot)
+{
+    Mutex::Lock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_PARAM + parameterSlot]);
+    const uint32_t parameter = ctx.paramOffset_ + parameterSlot * RKDA_PARAM_SLOT_BYTES_544;
+    if (ctx.td_->useGateInKernel) {
+        RecurrentKdaCopyRows(ctx, ctx.aLog_, task.head, 1, parameter, 1, 1);
+        if (ctx.td_->hasDtBias) RecurrentKdaCopyRows(ctx, ctx.bias_, task.head * RKDA_DIM_128, RKDA_DIM_128, parameter + 32, RKDA_DIM_128, 1);
+    }
+    Mutex::Unlock<PIPE_MTE2>(ctx.mutex_[RKDA_MUTEX_PARAM + parameterSlot]);
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaTrace(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint64_t event, uint64_t task, uint64_t token, uint64_t slot)
+{
+#ifdef RKDA_EXECUTION_TRACE
+    const uint64_t row = 1 + ctx.traceCount_ * 8;
+    ctx.trace_.SetValue(row, event); ctx.trace_.SetValue(row + 1, task);
+    ctx.trace_.SetValue(row + 2, token); ctx.trace_.SetValue(row + 3, slot);
+    ctx.trace_.SetValue(row + 4, GetBlockNum());
+    ctx.trace_.SetValue(row + 5, event == 7 || event == 8 ? slot : ctx.currentBank_);
+    ctx.trace_.SetValue(row + 6, ctx.currentBank_ | (ctx.nextBank_ << 2) | (ctx.prefetchedBank_ << 4));
+    ctx.trace_.SetValue(row + 7, event == 1 ? ctx.nextBank_ : ctx.prefetchedBank_);
+    ctx.trace_.SetValue(0, ++ctx.traceCount_);
+#endif
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage0PrefetchNextState(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &next, uint32_t bank)
+{
+    ctx.prefetchedBank_ = bank;
+    Stage0PrefetchState(ctx, next, bank);
+    RecurrentKdaTrace(ctx, 7, next.id, 0, bank);
+
+}
+
+template <class Gate, class Beta,
+          typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaDispatchLayout(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint32_t base, uint32_t slot,
+                                         uint32_t parameter)
+{
+    Stage1LaunchRecurrentKdaVF<Gate, Beta, stateVFirst, fusedMode>(ctx, base, slot, parameter);
+
+}
+
+template <class Gate,
+          typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaDispatchBeta(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint32_t base, uint32_t slot,
+                                       uint32_t parameter)
+{
+    if (ctx.td_->betaDtype == 0) RecurrentKdaDispatchLayout<Gate, float>(ctx, base, slot, parameter);
+    else if (ctx.td_->betaDtype == 1) RecurrentKdaDispatchLayout<Gate, bfloat16_t>(ctx, base, slot, parameter);
+    else RecurrentKdaDispatchLayout<Gate, half>(ctx, base, slot, parameter);
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaDispatch(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, uint32_t base, uint32_t slot,
+                                    uint32_t parameter)
+{
+    const uint32_t source = ctx.currentBank_;
+    const uint32_t target = ctx.nextBank_;
+    // VF reads may overlap an MTE3 read of the same source bank. Only its
+    // destination takes the snapshot lock; MTE2 takes both bank locks.
+    Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_STATE_USE + source]);
+    Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_STATE_USE + target]);
+    Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + target]);
+#if defined(DTYPE_GATE) && defined(DTYPE_BETA)
+    // OPP already selects a binary for each input dtype combination.
+    RecurrentKdaDispatchLayout<DTYPE_GATE, DTYPE_BETA>(ctx, base, slot, parameter);
+#else
+    // Direct kernel callers may supply dtype codes only through tiling.
+    if (ctx.td_->gateDtype == 0) RecurrentKdaDispatchBeta<float>(ctx, base, slot, parameter);
+    else if (ctx.td_->gateDtype == 1) RecurrentKdaDispatchBeta<bfloat16_t>(ctx, base, slot, parameter);
+    else RecurrentKdaDispatchBeta<half>(ctx, base, slot, parameter);
+#endif
+    Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + target]);
+    Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_STATE_USE + target]);
+    Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_STATE_USE + source]);
+
+}
+
+// 输入：当前任务及lookahead
+// 输出：完整tile out/末态。
+// 复用：交替输入/out槽和动态bank
+// 同步：输入/参数/out槽及State两类Mutex，Scalar可连续提交后续tile。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage1RunFinalStateTask(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &current, const RKDATask *nextTask,
+                                           bool prefetched, uint32_t parameterSlot,
+                                           uint32_t &slot, bool &pending, uint64_t &cursor,
+                                           RKDATask &following, bool &hasFollowing, bool &validTask,
+                                           const DataCopyExtParams &stateCopy)
+{
+    using StateLayout = RegBase::StateLayout<stateType, stateVFirst>;
+    constexpr uint32_t BANK = StateLayout::BYTES;
+    const int64_t begin = current.begin, end = current.end;
+    const uint64_t head = current.head, task = current.id;
+    const bool writeState = ctx.td_->inplaceFinalState || ctx.td_->outputFinalState;
+    const uint64_t stateOffset = current.request * ctx.td_->stateOutStride0 + head * ctx.td_->stateOutStride1;
+    const uint32_t parameter = ctx.paramOffset_ + parameterSlot * RKDA_PARAM_SLOT_BYTES_544;
+    hasFollowing = false;
+    RecurrentKdaTrace(ctx, 0, task, 0, slot);
+    if (prefetched) {
+        RecurrentKdaTrace(ctx, 8, task, 0, ctx.currentBank_);
+    } else {
+        Stage0PrefetchParameters(ctx, current, parameterSlot);
+        Stage0PrefetchState(ctx, current, ctx.currentBank_);
+        Stage0PrefetchInputs(ctx, current, begin, RecurrentKdaValidTokens(ctx, begin, end), slot);
+    }
+    Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_PARAM + parameterSlot]);
+    for (int64_t tile = begin; tile < end; tile += ctx.x_, slot ^= 1) {
+        const uint32_t valid = RecurrentKdaValidTokens(ctx, tile, end), base = uint32_t(tile - begin);
+        const bool lastTile = tile + valid == end;
+        Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_INPUT + slot]);
+        Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_OUT + slot]);
+        for (uint32_t t = 0; t < valid; ++t) {
+            const uint32_t token = base + t;
+            RecurrentKdaTrace(ctx, 1, task, token, slot);
+            RecurrentKdaDispatch(ctx, token, slot, parameter);
+            if (t == 0) {
+                // Submit tile input before late State prefetch on the MTE2 queue.
+                if (!lastTile) {
+                    Stage0PrefetchInputs(ctx, current, tile + valid,
+                        RecurrentKdaValidTokens(ctx, tile + valid, end), slot ^ 1);
+                } else if (nextTask) {
+                    Stage0PrefetchInputs(ctx, *nextTask, nextTask->begin,
+                        RecurrentKdaValidTokens(ctx, nextTask->begin, nextTask->end), slot ^ 1);
+                    RecurrentKdaTrace(ctx, 9, nextTask->id, 0, slot ^ 1);
+                }
+            }
+            if (base == 0 && t == 0 && nextTask)
+                Stage0PrefetchParameters(ctx, *nextTask, parameterSlot ^ 1);
+            if (nextTask && lastTile && t + 1 == valid) {
+                // Neither the final VF source nor its destination is overwritten.
+                // The MTE2 resource locks wait for the spare bank's old VF/DMA.
+                Stage0PrefetchNextState(ctx, *nextTask,
+                    3 - ctx.currentBank_ - ctx.nextBank_);
+            }
+            RecurrentKdaAdvanceBank(ctx);
+        }
+        if (base == 0 && nextTask)
+            hasFollowing = RecurrentKdaPrepareTask(ctx, cursor, following, validTask);
+        pending = false;
+        Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_INPUT + slot]);
+        Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_OUT + slot]);
+        RecurrentKdaTrace(ctx, 5, task, base + valid, slot);
+        Stage2WriteOutputTile(ctx, tile, valid, head, slot);
+        if (lastTile && writeState) {
+            const uint32_t finalBank = ctx.currentBank_;
+            Mutex::Lock<PIPE_MTE3>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + finalBank]);
+            DataCopyPad(ctx.stateOut_[stateOffset], ctx.ub_[finalBank * BANK].template ReinterpretCast<stateType>(), stateCopy);
+            Mutex::Unlock<PIPE_MTE3>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + finalBank]);
+        }
+        pending = true;
+        RecurrentKdaTrace(ctx, 11, task, base + valid, slot);
+    }
+    Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_PARAM + parameterSlot]);
+    RecurrentKdaTrace(ctx, 6, task, uint32_t(end - begin), slot);
+
+}
+
+// 输入：无indices任务
+// 输出：tile out及最终State。
+// 复用：旧末态DMA可跨任务，源bank完成前不得覆盖
+// 同步：资源Mutex保护实际覆盖，外层统一排空并释放ID。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaProcessFinalState(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx)
+{
+    using StateLayout = RegBase::StateLayout<stateType, stateVFirst>;
+    constexpr uint32_t BANK = StateLayout::BYTES;
+    uint64_t cursor = GetBlockIdx();
+    bool valid = true, prefetched = false, pending = false;
+    RKDATask current{}, next{}, following{};
+    bool active = RecurrentKdaPrepareTask(ctx, cursor, current, valid);
+    if (!active || !valid) return;
+    bool hasNext = RecurrentKdaPrepareTask(ctx, cursor, next, valid), hasFollowing = false;
+    if (!valid) return;
+    uint32_t initial = 0, parameterSlot = 0, inputSlot = 0;
+    // The output State row shape is invariant across all tasks on this core.
+    const DataCopyExtParams stateCopy{RKDA_DIM_128, RKDA_DIM_128 * sizeof(stateType), StateLayout::ROW_GAP,
+        static_cast<uint32_t>((ctx.td_->stateOutStride2 - RKDA_DIM_128) * sizeof(stateType)), 0};
+    while (active) {
+        if (!valid) {
+            return;
+        }
+        RecurrentKdaBeginBanks(ctx, initial);
+        Stage1RunFinalStateTask(ctx, current, hasNext ? &next : nullptr, prefetched,
+                          parameterSlot, inputSlot, pending, cursor, following, hasFollowing, valid, stateCopy);
+        if (!valid) {
+            return;
+        }
+        if (!hasNext) break;
+        initial = ctx.prefetchedBank_;
+        current = next;
+        next = following;
+        hasNext = hasFollowing;
+        parameterSlot ^= 1;
+        prefetched = true;
+    }
+    // The outer Process drains all resource locks, including cold-start error exits.
+    if (pending) {
+        RecurrentKdaTrace(ctx, 12, current.id, uint32_t(current.end - current.begin), inputSlot ^ 1);
+    }
+
+}
+
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline bool RecurrentKdaValidateSequences(const RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx)
+{
+    if (!ctx.td_->hasCuSeqlens) return true;
+    if (RecurrentKdaSequence(ctx, 0) != 0) return false;
+    int64_t previous = 0;
+    for (uint64_t request = 0; request < ctx.td_->b; ++request) {
+        int64_t end = RecurrentKdaSequence(ctx, request + 1);
+        if (end < previous || end > ctx.td_->t ||
+            (ctx.td_->hasSsmStateIndices && ctx.td_->ssmStateStride &&
+             uint64_t(end - previous) > ctx.td_->ssmStateStride)) return false;
+        previous = end;
+    }
+    return true;
+
+}
+
+// 输入：有indices任务；每token由VF更新State，MTE3写一份快照。
+// 复用：State快照Mutex保护递推目标，访问/快照两类Mutex保护第三bank预取。
+// out仍在整个tile计算完成后批量搬出，双槽使用独立完成事件。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void Stage1RunIndexedTask(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx, const RKDATask &current, const RKDATask *nextTask, bool prefetched,
+                                  uint32_t parameterSlot, uint32_t &nextInitialBank, uint32_t &slot,
+                                  uint32_t &pendingOut, const DataCopyExtParams &stateCopy)
+{
+    using StateLayout = RegBase::StateLayout<stateType, stateVFirst>;
+    constexpr uint32_t BANK = StateLayout::BYTES;
+    const uint64_t task = current.id, request = current.request, head = current.head;
+    const int64_t begin = current.begin, end = current.end;
+    RecurrentKdaTrace(ctx, 0, task, 0, slot);
+    if (prefetched) {
+        RecurrentKdaTrace(ctx, 8, task, 0, ctx.currentBank_);
+    }
+    // Source readiness is covered by the first VF's State-use lock.
+    Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_PARAM + parameterSlot]);
+    const uint32_t parameter = ctx.paramOffset_ + parameterSlot * RKDA_PARAM_SLOT_BYTES_544;
+    const bool writeState = ctx.td_->inplaceFinalState || ctx.td_->outputFinalState;
+    uint64_t previousSlot = RKDA_INVALID_SLOT, olderSlot = RKDA_INVALID_SLOT;
+    for (int64_t tile = begin; tile < end; tile += ctx.x_, slot ^= 1) {
+        const uint32_t valid = RecurrentKdaValidTokens(ctx, tile, end), base = uint32_t(tile - begin);
+        const bool lastTile = tile + valid == end;
+        Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_INPUT + slot]);
+        Mutex::Lock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_OUT + slot]);
+        if (pendingOut & (1U << slot)) {
+            pendingOut &= ~(1U << slot);
+            RecurrentKdaTrace(ctx, 12, task, base, slot);
+        }
+        for (uint32_t t = 0; t < valid; ++t) {
+            const uint32_t token = base + t, count = token + 1;
+            const uint32_t bank = ctx.nextBank_;
+            RecurrentKdaTrace(ctx, 1, task, token, slot);
+            RecurrentKdaDispatch(ctx, token, slot, parameter);
+            if (t == 0) {
+                // Prefetch into the opposite input slot while the first VF runs.
+                if (!lastTile) {
+                    Stage0PrefetchInputs(ctx, current, tile + valid,
+                        RecurrentKdaValidTokens(ctx, tile + valid, end), slot ^ 1);
+                } else if (nextTask) {
+                    Stage0PrefetchInputs(ctx, *nextTask, nextTask->begin,
+                        RecurrentKdaValidTokens(ctx, nextTask->begin, nextTask->end), slot ^ 1);
+                    RecurrentKdaTrace(ctx, 9, nextTask->id, 0, slot ^ 1);
+                }
+            }
+            if (base == 0 && t == 0 && nextTask)
+                Stage0PrefetchParameters(ctx, *nextTask, parameterSlot ^ 1);
+            if (writeState) {
+                // The snapshot mutex waits for this token's stores; Scalar continues
+                // issuing the next token instead of polling a done word in UB.
+                Mutex::Lock<PIPE_MTE3>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + bank]);
+                const uint64_t destinationSlot = RecurrentKdaSlot(ctx, request, begin, tile + t);
+                // Three banks permit two older snapshots to remain in flight.
+                // Serialize repeated GM destinations even if their UB banks differ.
+                if (destinationSlot == previousSlot || destinationSlot == olderSlot) PipeBarrier<PIPE_MTE3>();
+                olderSlot = previousSlot;
+                previousSlot = destinationSlot;
+                const uint64_t destination = destinationSlot * ctx.td_->stateOutStride0 +
+                                             head * ctx.td_->stateOutStride1;
+                DataCopyPad(ctx.stateOut_[destination], ctx.ub_[bank * BANK].template ReinterpretCast<stateType>(), stateCopy);
+                Mutex::Unlock<PIPE_MTE3>(ctx.mutex_[RKDA_MUTEX_STATE_DMA + bank]);
+                RecurrentKdaTrace(ctx, 3, task, count, slot);
+            }
+            if (nextTask && lastTile && t + 1 == valid) {
+                nextInitialBank = 3 - ctx.currentBank_ - ctx.nextBank_;
+                Stage0PrefetchNextState(ctx, *nextTask, nextInitialBank);
+            }
+            RecurrentKdaAdvanceBank(ctx);
+        }
+        // Resource locks keep input/output slots alive while Scalar submits
+        // the next tile; MTE3 waits for all tile stores through the out lock.
+        Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_INPUT + slot]);
+        Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_OUT + slot]);
+        Stage2WriteOutputTile(ctx, tile, valid, head, slot);
+        pendingOut |= 1U << slot;
+        RecurrentKdaTrace(ctx, 11, task, base + valid, slot);
+    }
+    Mutex::Unlock<PIPE_V>(ctx.mutex_[RKDA_MUTEX_PARAM + parameterSlot]);
+    RecurrentKdaTrace(ctx, 6, task, uint32_t(end - begin), slot);
+}
+
+// 输入：已初始化context
+// 输出：本核全部任务。
+// 复用：输入/out双槽、三个轮换递推bank，末token向空闲bank预取
+// 同步：各资源成对Lock/Unlock，外层统一排空。
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void RecurrentKdaProcessIndexed(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx)
+{
+    uint64_t cursor = GetBlockIdx();
+    bool valid = true;
+    RKDATask current{}, next{};
+    bool active = RecurrentKdaPrepareTask(ctx, cursor, current, valid);
+    uint32_t initialBank = 0, parameterSlot = 0, inputSlot = 0;
+    uint32_t pendingOut = 0;
+    bool prefetched = false;
+    // Every task on this core uses the same State row descriptor.
+    using StateLayout = RegBase::StateLayout<stateType, stateVFirst>;
+    const DataCopyExtParams stateCopy{RKDA_DIM_128, RKDA_DIM_128 * sizeof(stateType), StateLayout::ROW_GAP,
+        static_cast<uint32_t>((ctx.td_->stateOutStride2 - RKDA_DIM_128) * sizeof(stateType)), 0};
+    if (active) {
+        // Current metadata is valid. Fill the first task's bank/input slot
+        // while Scalar prepares and validates the next task.
+        Stage0PrefetchParameters(ctx, current, parameterSlot);
+        Stage0PrefetchState(ctx, current, initialBank);
+        Stage0PrefetchInputs(ctx, current, current.begin,
+            RecurrentKdaValidTokens(ctx, current.begin, current.end), inputSlot);
+    }
+    while (active) {
+        const bool hasNext = RecurrentKdaPrepareTask(ctx, cursor, next, valid);
+        if (!valid) {
+            break;
+        }
+        RecurrentKdaBeginBanks(ctx, initialBank);
+        Stage1RunIndexedTask(ctx, current, hasNext ? &next : nullptr, prefetched, parameterSlot, initialBank, inputSlot,
+            pendingOut, stateCopy);
+        if (!hasNext) break;
+        current = next;
+        parameterSlot ^= 1;
+        prefetched = true;
+    }
+
+
+}
+
+// All error/empty/tail paths return here. Drain on Vector, without a Scalar
+// wait. ReleaseMutexID only frees allocator bookkeeping; no ID is reused in
+// this invocation. Kernel completion retains the queued Vector/DMA lifetime.
+template <typename inType, typename outType, typename stateType, bool stateVFirst, bool fusedMode>
+__aicore__ inline void ProcessRecurrentKda(RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode> &ctx)
+{
+    if (RecurrentKdaValidateSequences(ctx)) {
+        if (ctx.td_->hasSsmStateIndices) RecurrentKdaProcessIndexed(ctx);
+        else RecurrentKdaProcessFinalState(ctx);
+    }
+    for (uint32_t i = 0; i < RKDA_MUTEX_COUNT; ++i) {
+        Mutex::Lock<PIPE_V>(ctx.mutex_[i]);
+        Mutex::Unlock<PIPE_V>(ctx.mutex_[i]);
+        ReleaseMutexID(ctx.mutex_[i]);
+    }
+}
+
+} // namespace RecurrentKda

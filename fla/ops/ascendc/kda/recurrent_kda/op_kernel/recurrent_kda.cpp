@@ -13,20 +13,23 @@
  */
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
 #include "arch92/recurrent_kda.h"
+#include "arch92/recurrent_kda_legacy.h"
 #elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/recurrent_kda.h"
+#include "arch35/recurrent_kda_legacy.h"
 #else
 #include "recurrent_kda.h"
 #endif
 #include "recurrent_kda_tiling_data.h"
+#include "recurrent_kda_tiling_key.h"
 
 
 using namespace AscendC;
-using namespace matmul;
 using namespace RecurrentKda;
 
 
-extern "C" __global__ __aicore__ void
+template <uint32_t KERNEL_MODE>
+__global__ __aicore__ void
 recurrent_kda(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR gate, GM_ADDR beta, GM_ADDR initialState,
               GM_ADDR cuSeqlens, GM_ADDR ssmStateIndices, GM_ADDR aLog, GM_ADDR dtBias, GM_ADDR numAcceptedTokens,
               GM_ADDR out, GM_ADDR initialStateOut, GM_ADDR finalState, GM_ADDR workspaceGM, GM_ADDR tilingGM)
@@ -34,11 +37,35 @@ recurrent_kda(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR gate, GM_ADDR b
     REGISTER_TILING_DEFAULT(RecurrentKdaTilingData);
     GET_TILING_DATA(tilingData, tilingGM);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    GM_ADDR stateOutput = tilingData.inplaceFinalState == 1 ? initialStateOut : finalState;
+#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201) || (defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
+    // A5(DAV_3510)/A6(DAV_9201)：V=128 走静态 UB + 逐 token VF（窗口/bank 按架构固定）；
+    // V=256 仍走每段 <=8 的兼容路径。
+    if constexpr (KERNEL_MODE == RKDA_TPL_COMPAT) {
+        TPipe pipe;
+        RKDALegacyInitParams legacy{query, key, value, gate, beta, initialState, cuSeqlens,
+            ssmStateIndices, aLog, dtBias, numAcceptedTokens, out, stateOutput};
+        RKDALegacy<bfloat16_t, bfloat16_t, DTYPE_INITIAL_STATE> op(&tilingData);
+        op.Init(legacy, &pipe);
+        op.Process();
+    } else {
+        // 静态 Tensor 直接持有 UB 与同步，不申请 TPipe 缓冲。
+        RKDAInitParams initParams{query, key, value, gate, beta, initialState, cuSeqlens, ssmStateIndices,
+                                  aLog, dtBias, numAcceptedTokens, out, stateOutput};
+        InitSocState();
+        constexpr bool stateVFirst = KERNEL_MODE != RKDA_TPL_K_FIRST;
+        constexpr bool fusedMode = KERNEL_MODE == RKDA_TPL_V_FIRST_FUSED;
+        RKDAVectorContext<bfloat16_t, bfloat16_t, DTYPE_INITIAL_STATE, stateVFirst, fusedMode> ctx;
+        InitRecurrentKda(ctx, &tilingData, initParams);
+        ProcessRecurrentKda(ctx);
+        PipeBarrier<PIPE_ALL>();
+    }
+#else
     TPipe pipe;
     RKDA<bfloat16_t, bfloat16_t, DTYPE_INITIAL_STATE> op(&tilingData);
-    GM_ADDR stateOutput = tilingData.inplaceFinalState == 1 ? initialStateOut : finalState;
     RKDAInitParams initParams{query, key, value, gate, beta, initialState, cuSeqlens, ssmStateIndices,
                               aLog, dtBias, numAcceptedTokens, out, stateOutput};
     op.Init(initParams, &pipe);
     op.Process();
+#endif
 }
