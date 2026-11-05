@@ -73,7 +73,10 @@
   <div class="card">
     <span class="tag">一句话结论</span>
     A6 与 A5 是<b>同一套算法</b>，差别只在架构常量：State bank 3→4、窗口 8→32（FP32 K-first 仍为 16）、
-    Mutex 12→14；UB 占用从约 88% 提升到 93%。三发射不需要新增代码，靠现有“4 行 × 2 段”的 8 条独立短指令流吃满。
+    Mutex 12→14；UB 占用从约 88% 提升到 93%。三发射不需要新增代码，靠现有“4 行 × 2 段”的 8 条独立短指令流吃满。</div>
+  <div class="card" style="margin-top:12px">
+    <span class="tag">相对 PR 的 A5</span>
+    除了上面的架构常量，A5/A6 的 <b>V=256 legacy 路径</b>还额外做了两件事：删掉 K≠128 的死分支、把 norm/gate/类型转换等全部计算从 UB 级（membase）改为 RegBase（见第 6 节）。
   </div>
 
   <h2>1. 先看 A5：一条序列是怎么算完的</h2>
@@ -293,7 +296,52 @@
     </tbody>
   </table>
 
-  <h2>6. 验证清单</h2>
+  <h2>6. V=256 legacy：相对 PR 的 A5 还改了什么</h2>
+
+  <p>V=256 在 A5/A6 上走 legacy（tiling key = 0，每段长度 ≤ 8）。PR 的 A5 里这条路径仍是 TPipe + UB 级 API；
+    本仓把它换成了纯 RegBase 计算，并删除了不可能进入的分支——aclnn 与 host 已双重保证 <code>K=128</code>、<code>V∈{128,256}</code>。</p>
+
+  <div class="grid g2">
+    <div class="card">
+      <h3>删掉的死分支</h3>
+      <ul>
+        <li><code>InitLocalBuffers</code>：不再另开 broadTmp，直接复用 state 工作区</li>
+        <li><code>ReduceSumDispatch</code>：固定 <code>ReduceSum128</code></li>
+        <li><code>Compute</code>：删除 <code>MatVecMul → ReduceSum → Sub/Muls → ProcessKQ</code> 的 membase 回退</li>
+        <li><code>CopyInBeta</code> / <code>ProcessHead</code>：删除 <code>alignK_ != 128</code> 的条件同步与 beta 预读</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>为什么收益集中在“输入准备”</h3>
+      <ul>
+        <li>legacy 一段最多 8 个 token，每 tile 的固定开销占比高</li>
+        <li>原实现每行 norm 都要 <code>ReduceSum → GetValue</code>：8 行 × q/k = 16 次 V→S 往返</li>
+        <li>gate 变换原本是 ~7 趟整块 UB 运算 + 7 次 barrier</li>
+      </ul>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>原实现（membase）</th><th>现实现（RegBase）</th></tr></thead>
+    <tbody>
+      <tr><td><code>NormalizeRows</code>：逐行 Mul→ReduceSum→Adds→Sqrt→GetValue→Muls</td><td><code>NormScaleVF</code>：整块 q/k 寄存器内 norm，q 顺带 scale</td></tr>
+      <tr><td><code>ApplyGateInKernel</code>：Add/Muls/Exp/Adds/Div/Ln 整块 UB 序列</td><td><code>GateTransformVF</code>：一次 VF，safe 分支用 <code>RegBase::Sigmoid</code></td></tr>
+      <tr><td><code>CopyInGate</code>：Duplicate + Adds/Cast</td><td><code>UnpackRowsVF&lt;gateType,128&gt;</code></td></tr>
+      <tr><td>q/k/v 三条整块 Cast</td><td><code>UnpackRowsVF&lt;inType,128|128|256&gt;</code>（v 分 4 段）</td></tr>
+      <tr><td>State 读入 / 转置分支的 Adds/Cast</td><td><code>UnpackRowsVF&lt;stateType,128&gt;</code></td></tr>
+      <tr><td>State 写回 Cast</td><td><code>PackRowsVF&lt;stateType,128&gt;</code></td></tr>
+      <tr><td>out 写回 Cast（扁平向量）</td><td><b><code>PackFlatVF</code></b>（不可按行块，否则越界踏 UB）</td></tr>
+      <tr><td>beta 的 Adds/Cast</td><td><code>UnpackFlatVF</code>（64 lane 分段 + 尾段掩码）</td></tr>
+      <tr><td>ReadFloat / ExpScalar 的单元素 ops</td><td><code>ScalarCopyVF / ScalarExpVF</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    语义不变：legacy 的 State 在 UB 内始终是 <b>FP32</b>，只在最终写回时 cast，因此标杆只在 V=128 静态路径模拟 bf16 逐 token 存储；
+    DMA 仍是 <code>DataCopyPad</code> + 队列，属于数据搬运而不是 membase 计算。
+  </div>
+
+  <h2>7. 验证清单</h2>
 
   <div class="good">
     <ul>
@@ -303,6 +351,8 @@
       <li>功能：<code>atk_recurrent_kda_a6.json</code>（130 条，S=1…1024，含 31/32/33 窗口边界、空段、padding、slot 索引）。</li>
       <li>性能：msprof 对比 X=16 与 X=32 的 Task Duration（重点 T≥257），并观察短指令双发率与 <code>ReduceSum</code> 占比。</li>
       <li>同步：<code>-scope=determinism</code> 与 <code>-scope=mssanitizer</code>，覆盖末 token 初态预取与逐 token 快照在飞。</li>
+      <li>V=256 legacy：在 A5 与 A6 各跑 <code>atk_recurrent_kda_a6.json</code> 的 79–88，
+          对比改造前后 final_state 精度；重点看 out 的 <code>PackFlatVF</code> 与 beta 尾段。</li>
     </ul>
   </div>
 

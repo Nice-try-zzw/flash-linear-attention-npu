@@ -1,8 +1,7 @@
 # RecurrentKda ascend960dt（A6）专项设计与优化
 
 > 基线：PR #997（分支 `codex/recurrent-kda-x8-pr`）的 A5 新实现（静态 UB + 资源 Mutex + 逐 token VF）。
-> A6 由同一套代码在 `arch92/` 上按架构常量特化；通用语义见 [design.md](./design.md)。
-> 面向评审的可视化简明版（含 UB 切分条形图）见 [a6-optimization-detail.html](./a6-optimization-detail.html)。
+> A6 由同一套代码在 `arch92/` 上按架构常量特化；
 
 ## 1. 结论速览
 
@@ -13,7 +12,7 @@
 | A6 特性 2：UB 248KB → 384KB | 窗口 `X` 8→**32**（BF16 / FP32 V-first），FP32 K-first 因 bank 行间距保持 **16**；UB 占用 80.2%/84.4% → **93.0%/84.4%** |
 | State bank | 3 → **4**：逐 token 落盘（`ssm_state_indices`）时多一份快照在飞 |
 | 理论收益 | 稳态 token 计算不变；tile 级固定开销（DMA 指令、Mutex 对、槽位翻转、循环分支）随 X 减半，**长序列约 3–4% kernel 周期回收**；三发射上限可把短指令槽从 1 条/拍提到 2 条/拍 |
-| 未采用 | 5 bank、4 输入槽、4 out 槽、8 行块、2 token/VF（第 6 节给出拒绝理由与数字） |
+| 未采用 | 5 bank、4 输入槽、4 out 槽、8 行块、2 token/VF（第 6 节给出拒绝理由与数据） |
 
 ## 2. A6 硬件特性与利用情况
 
@@ -34,10 +33,45 @@
 | VF 窗口取模 | `base % 8` | `base % WINDOW`（模板常量，32/16，均为 2 的幂） | `arch92/recurrent_kda_vec.h` |
 | 三发射 | 8 条短指令流（双发射只吃 1 短/拍） | 同一份代码，A6 可吃 2 短/拍 | 无额外代码 |
 | host 方案 | `PlanA5Ub`：`min(ubSize,248KB)` | `PlanA6Ub`：384KB + 按布局选窗口 | `op_host/recurrent_kda_tiling_processor.h` |
+| V=256 legacy 计算 | PR 原样：norm/gate/Cast 走 UB 级 API | 同 A5，已改为全 RegBase（见 §3.1） | `arch35`、`arch92` 的 `recurrent_kda_legacy.h` |
 
 窗口之所以按布局分档：K-first FP32 的 bank 为 `128×136`（32B 行间距避免 Gather/Scatter 撞 bank），
 每 bank 比 64KiB 多 4KiB；4 bank 时窗口 32 会把 UB 推到 382,016B（97.2%，余量仅 11,200B），
 若平台还保留其它 UB 区就会越界，因此该组合保持窗口 16。
+
+### 3.1 V=256 legacy 路径：与 PR 上 A5 的差异
+
+`RKDALegacy` 只在 **A5/A6 且 V=256** 时被实例化（tiling key = 0），每段长度 ≤ 8；A2/A3 走根目录通用 kernel，不受本节影响。这条路径在 PR 的 A5 里是原样继承的 TPipe 实现，本仓做了两类改造，**arch35（A5）与 arch92（A6）同步**。
+
+**前置事实**：aclnn 与 host 双重拦截 `K == 128`、`V ∈ {128, 256}`，因此 kernel 内 `alignK_ ≡ 128 = TWO_V_LENGTH` 恒成立。
+
+**（1）删除 K≠128 的死分支**
+
+| 位置 | 删除内容 |
+| --- | --- |
+| `InitLocalBuffers` | `alignK_==128 ? stateInUb : 另开 broadTmp` 的 else |
+| `ReduceSumDispatch` | `<=64 / <=128 / else` 三分支，固定 `ReduceSum128` |
+| `Compute` | 通用 membase 回退（`MatVecMul → ReduceSum → Sub/Muls → ProcessKQ → ReduceSum`） |
+| `CopyInBeta` 尾 | `if (alignK_ != 128) SyncVToS()` |
+| `ProcessHead` | `if (alignK_ != 128) beta_ = LoadBeta(...)` |
+
+**（2）计算全部改为 RegBase（不再出现 UB 级 membase 计算）**
+
+| 原实现 | 现实现 |
+| --- | --- |
+| `NormalizeRows`：逐行 `Mul → ReduceSum → Adds → Sqrt → GetValue → Muls` | `NormScaleVF`：整块 q/k 在寄存器内做 norm，q 顺带 scale；消除每 tile 16 次 V→S 往返 |
+| `ApplyGateInKernel`：~40 行 `Add/Muls/Exp/Adds/Div/Ln` + 7 次 barrier | `GateTransformVF`：一次 VF 完成 dt_bias + A_log + safe/raw 变换（safe 用 `RegBase::Sigmoid`，溢出安全） |
+| `CopyInGate` 的 `Duplicate/Adds/Cast` | `UnpackRowsVF<gateType,128>`（Load 时 unpack b16 + cast） |
+| q/k/v 三条 `Cast(CAST_NONE)` | `UnpackRowsVF<inType,128|128|256>`（v 宽 256，分 4 段） |
+| `CopyInState` / 转置分支的 `Adds/Cast` | `UnpackRowsVF<stateType,128>` |
+| `Compute` 的状态写回 `Cast(CAST_RINT)` | `PackRowsVF<stateType,128>` |
+| `Compute` 的 out 写回 `Cast(CAST_RINT)` | **`PackFlatVF`**（out 一个 V 切片是扁平向量，不能按行块转换） |
+| `CopyInBeta` 的 `Adds/Cast` | `UnpackFlatVF<betaType>`（64 lane 分段 + 尾段掩码） |
+| `ReadFloat/ExpScalar` 的单元素 `Adds/Duplicate/Exp` | `ScalarCopyVF/ScalarExpVF`（单 lane 寄存器操作） |
+
+**语义不变点**：State 在 legacy 的 UB 内**始终是 FP32**，只在最终写回时 cast 成 `state_dtype`；这与 V=128 静态路径的 bf16 bank（每 token 舍入）不同，因此标杆只在 V=128 时模拟 bf16 存储。DMA 仍走 `DataCopyPad` 与队列 `AllocTensor/EnQue`（属数据搬运，不属于 membase 计算）。
+
+**影响**：per-token 递推成本不变；收益集中在**每 tile 的输入准备阶段**（V=256 一段最多 8 token，固定开销占比高，收益更明显），同时少了每行的标量回读与流水切换。
 
 ## 4. UB 预算明细
 
@@ -152,7 +186,7 @@ DMA 总字节不变，减少的是 DMA 指令条数、同步条数与循环开�
 
 | 方案 | 理论收益 | 不采用原因 |
 | --- | --- | --- |
-| State bank 4→5 | 再多一份快照在飞 | BF16 可放下（381KB），但 FP32 K-first 需 401KB 超出 384KB；bank 数必须与编译期布局一致，收益仅限落盘路径 |
+| State bank 4→5 | 再多一份快照 | BF16 可放下（381KB），但 FP32 K-first 需 401KB 超出 384KB；bank 数必须与编译期布局一致，收益仅限落盘路径 |
 | 输入槽 2→3/4 | 预取更远 | 当前在 tile 首个 token 就把下一 tile 搬入，16/32 个 token 的计算时间足以覆盖 DMA；实测无增量，只白占 UB |
 | out 槽 2→4 | MTE3 更晚回收 | out 每 tile 仅 8KiB，MTE3 被计算完全掩盖 |
 | 行块 4→8 | 更多短流填槽 | 寄存器需要 16 State + 16 乘积 + 8 delta，超过向量寄存器预算，必然 spill |
@@ -160,19 +194,7 @@ DMA 总字节不变，减少的是 DMA 指令条数、同步条数与循环开�
 | X=64 | tile 数再减半 | BF16 需 428KB、FP32 K-first 需 445KB，均超过 384KB |
 | K-first FP32 也开 X=32 | 多 3–4% | 382,016B 占 97.2%，余量仅 11,200B，平台保留区一变就 tiling 失败 |
 
-## 7. 验证
+## 7. 风险
 
-1. `bash build.sh --pkg --soc=ascend960dt --ops=recurrent_kda`：确认四个 `KERNEL_MODE` 实例产出。
-2. `OP_LOGD` 核对：BF16/FP32-V-first `windowSize=32 / ubRestBytes=365632`，
-   FP32 K-first `windowSize=16 / ubRestBytes=331840`，`stateOutBufferNum=4`。
-3. 功能：`atk_recurrent_kda_a6.json`（130 条，S 覆盖 1…1024，含 31/32/33 窗口边界）、
-   `atk_recurrent_kda_longseq.json`；重点看 `T mod 32` 的尾窗口、`0` 长度段、`padding`。
-4. 性能：用 msprof 对比 X=16 与 X=32 的 `Task Duration`，重点看长序列（T≥257）与
-   `ssm_state_indices` 路径；同时观察 `ReduceSum` 占比，确认三发射是否把短槽吃满。
-
-## 8. 风险
-
-- 平台上报的可用 UB 若小于 384KB（A5 就保留了约 8KiB），FP32 K-first 仍有 61KB 余量、BF16/V-first
-  有 27.5KB 余量，安全；K-first FP32 用 X=32 才会贴顶，因此已回退到 16。
 - 窗口 32 时首个 tile 的冷启动 DMA 变大（32 行），但只影响任务首个 tile，且 DMA 字节本身很小
   （每 token 约 2.1KB），对短任务无影响（尾 tile 按有效 token 搬）。
