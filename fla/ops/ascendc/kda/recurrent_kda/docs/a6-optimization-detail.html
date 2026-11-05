@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RecurrentKda A6 详细设计（可视化版）</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1c2330; --ink-2:#4a5568; --ink-3:#7b8494;
+    --line:#e3e7ee; --brand:#2456c4; --brand-soft:#e8eefb;
+    --c-bank:#2456c4; --c-qkv:#2a9d8f; --c-gate:#43a047; --c-beta:#c9a227;
+    --c-param:#8d99ae; --c-out:#e07b39; --c-guard:#5f6b7a; --c-free:#eef1f5;
+    --ok:#2e7d32; --warn:#b26b00;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+       line-height:1.75;font-size:15px}
+  .page{max-width:1040px;margin:0 auto;padding:40px 28px 64px}
+  h1{font-size:26px;margin:0 0 6px}
+  h2{font-size:20px;margin:44px 0 12px;padding-left:10px;border-left:4px solid var(--brand)}
+  h3{font-size:16px;margin:22px 0 8px}
+  p{margin:8px 0;color:var(--ink-2)}
+  .sub{color:var(--ink-3);font-size:13px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{color:var(--ink-3);font-weight:600;background:#fafbfd}
+  code{background:#f2f4f8;border-radius:4px;padding:1px 5px;font-size:13px;
+       font-family:ui-monospace,Consolas,monospace}
+  .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;
+       background:var(--brand-soft);color:var(--brand);margin-right:6px}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0}
+  .flow .node{background:var(--card);border:1px solid var(--line);border-radius:8px;
+              padding:8px 12px;font-size:13.5px}
+  .flow .arrow{color:var(--ink-3);font-size:15px}
+  /* UB bars */
+  .bar{display:flex;height:34px;border-radius:6px;overflow:hidden;border:1px solid var(--line);
+       background:var(--c-free)}
+  .seg{height:100%}
+  .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:12.5px;color:var(--ink-2)}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .num{font-variant-numeric:tabular-nums}
+  .cap{font-size:12.5px;color:var(--ink-3);margin-top:6px}
+  .kpi{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+  .kpi b{font-size:15px}
+  .kpi span{font-size:12.5px;color:var(--ink-3)}
+  /* issue chart */
+  .issue{display:grid;gap:6px;margin:10px 0}
+  .issue-row{display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center}
+  .issue-track{height:22px;background:#f2f4f8;border-radius:5px;overflow:hidden;display:flex}
+  .issue-short{background:var(--c-qkv);height:100%}
+  .issue-long{background:var(--c-out);height:100%}
+  .note{border-left:3px solid var(--warn);background:#fff8ee;padding:10px 14px;border-radius:0 8px 8px 0;
+        font-size:13.5px;color:#6b4a00}
+  .good{border-left:3px solid var(--ok);background:#f1f8f1;padding:10px 14px;border-radius:0 8px 8px 0;
+        font-size:13.5px;color:#255c28}
+  ul{margin:8px 0 8px 20px;color:var(--ink-2)}
+  li{margin:4px 0}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:13px}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>RecurrentKda：A6（ascend960dt）详细设计</h1>
+  <p class="sub">基线：PR #997 的 A5 新实现（静态 UB + 资源 Mutex + 逐 token VF）；本文说明 A6 在此基础上按 384KB UB 与三发射做的调整，并可视化 UB 切分变化。</p>
+
+  <div class="card">
+    <span class="tag">一句话结论</span>
+    A6 与 A5 是<b>同一套算法</b>，差别只在架构常量：State bank 3→4、窗口 8→32（FP32 K-first 仍为 16）、
+    Mutex 12→14；UB 占用从约 88% 提升到 93%。三发射不需要新增代码，靠现有“4 行 × 2 段”的 8 条独立短指令流吃满。
+  </div>
+
+  <h2>1. 先看 A5：一条序列是怎么算完的</h2>
+
+  <p>A5 的 V=128 路径把「一条序列 × 一个 value head」当成一个<b>任务</b>，任务再按固定窗口切 <b>tile</b>，
+    tile 内逐个 token 递推状态。整个过程不经过 <code>TPipe/TQue</code>，UB 地址全部是编译期常量。</p>
+
+  <div class="flow">
+    <div class="node">任务<br><span class="sub">(seq, value head)</span></div>
+    <div class="arrow">→</div>
+    <div class="node">tile<br><span class="sub">固定 X 个 token</span></div>
+    <div class="arrow">→</div>
+    <div class="node">token<br><span class="sub">一次 VF</span></div>
+    <div class="arrow">→</div>
+    <div class="node">State 递推<br><span class="sub">decay → S@k → delta → outer → S@q</span></div>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h3>逐 token 的四步递推</h3>
+      <ul>
+        <li><code>S = S * α</code>（gate 衰减，α 来自 gate/beta）</li>
+        <li><code>dot = S @ k</code>，<code>delta = (v - dot) * β</code></li>
+        <li><code>S = S + delta ⊗ k</code>（外积更新）</li>
+        <li><code>out = S @ q</code>（用更新后的状态）</li>
+      </ul>
+      <p class="cap">K=V=128 时每行 128 个 float，一次处理 64 lane，因此每行分两段。</p>
+    </div>
+    <div class="card">
+      <h3>UB 里同时存在的东西</h3>
+      <ul>
+        <li><b>State bank</b>：完整 128×128 FP32 状态（64KiB/份），按 bank 轮转</li>
+        <li><b>输入双槽</b>：q/k/v/gate/beta 各两套，供 MTE2 提前搬下一 tile</li>
+        <li><b>out 双槽</b>：tile 内攒齐后一次性搬出</li>
+        <li><b>参数双槽</b>：A_log + dt_bias，按 head 预取</li>
+        <li><b>guard</b>：2048B，含 512B VF 数值 scratch</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>同步方式（Mutex，而不是 SetFlag/WaitFlag）</h3>
+    <p>每个共享资源配一份 Mutex：State 访问、State 快照、输入槽、参数槽、out 槽。生产者搬完就
+      <code>Unlock</code>，消费者用前 <code>Lock</code>；Scalar 提交解锁不等于数据已完成，跨流水依赖由
+      Mutex 排队，同流水内的访存依赖仍用 <code>LocalMemBar</code>/<code>PipeBarrier</code>。</p>
+    <p>A5 的配置：窗口 <b>X=8</b>、State bank <b>3</b> 份、Mutex <b>12</b> 份、可用 UB 按 <b>248KB</b> 计。</p>
+  </div>
+
+  <h2>2. A6 的两个硬件增量，以及对应改动</h2>
+
+  <div class="grid g2">
+    <div class="card">
+      <h3>增量一：vector 三发射</h3>
+      <p>A5 每拍可发 <b>1 长 + 1 短</b>；A6 可发 <b>1 长 + 2 短</b>。代码里每个 4 行块天然有
+        <b>4 行 × 每行 2 段 = 8 条互不依赖的短指令流</b>，已经够填满 2 个短槽，所以这部分<b>没有新增代码</b>，
+        只需要编译器把 8 条流交错排布。</p>
+    </div>
+    <div class="card">
+      <h3>增量二：UB 248KB → 384KB</h3>
+      <p>用多出来的空间做两件事：</p>
+      <ul>
+        <li>State bank 3 → <b>4</b>：逐 token 落盘（<code>ssm_state_indices</code>）时可多留一份快照在飞；</li>
+        <li>窗口 8 → <b>32</b>（BF16 / FP32 V-first）：每个 tile 的 DMA/同步/循环开销摊薄一半。</li>
+        <li>FP32 K-first 因 bank 带 32B 行间距（128×136），4 bank 下窗口保持 <b>16</b>，避免 UB 顶死。</li>
+      </ul>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>项目</th><th>A5（arch35）</th><th>A6（arch92）</th></tr></thead>
+    <tbody>
+      <tr><td>窗口 X</td><td>8</td><td>32（BF16、FP32 V-first）；16（FP32 K-first）</td></tr>
+      <tr><td>State bank</td><td>3</td><td>4</td></tr>
+      <tr><td>Mutex 份数</td><td>12（3+3+2+2+2）</td><td>14（4+4+2+2+2）</td></tr>
+      <tr><td>窗口取模</td><td><code>base % 8</code></td><td><code>base % WINDOW</code>（模板常量 32/16，均 2 的幂 → 位运算）</td></tr>
+      <tr><td>UB 预算</td><td><code>min(ubSize, 248KB)</code></td><td>384KB，按布局选窗口</td></tr>
+      <tr><td>tiling key</td><td>COMPAT / V_FIRST / K_FIRST / V_FIRST_FUSED</td><td>同左，A6 V=128 按布局与融合位选实例</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. UB 切分对比（可视化）</h2>
+
+  <p>下面三张条形图按<b>各平台可用 UB 的百分比</b>画（A5 按 248KB 预算，A6 按 384KB）。色块越靠左越“贵”，
+    因为 State bank 是每 token 都要读写的热数据。</p>
+
+  <div class="card">
+    <div class="kpi"><b>A5 · BF16 · X=8 · 3 bank</b><span class="num">224,832 B / 253,952 B = 88.5%</span></div>
+    <div class="bar">
+      <div class="seg" style="width:77.42%;background:var(--c-bank)"></div>
+      <div class="seg" style="width:4.84%;background:var(--c-qkv)"></div>
+      <div class="seg" style="width:3.23%;background:var(--c-gate)"></div>
+      <div class="seg" style="width:0.20%;background:var(--c-beta)"></div>
+      <div class="seg" style="width:0.43%;background:var(--c-param)"></div>
+      <div class="seg" style="width:1.61%;background:var(--c-out)"></div>
+      <div class="seg" style="width:0.81%;background:var(--c-guard)"></div>
+    </div>
+    <p class="cap">State bank 196,608 B ｜ q/k/v 12,288 ｜ gate 8,192 ｜ beta 512 ｜ 参数 1,088 ｜ out 4,096 ｜ guard 2,048 ｜ 余量 29,120</p>
+  </div>
+
+  <div class="card">
+    <div class="kpi"><b>A6 · BF16 / FP32 V-first · X=32 · 4 bank</b><span class="num">365,632 B / 393,216 B = 93.0%</span></div>
+    <div class="bar">
+      <div class="seg" style="width:66.67%;background:var(--c-bank)"></div>
+      <div class="seg" style="width:12.50%;background:var(--c-qkv)"></div>
+      <div class="seg" style="width:8.33%;background:var(--c-gate)"></div>
+      <div class="seg" style="width:0.52%;background:var(--c-beta)"></div>
+      <div class="seg" style="width:0.28%;background:var(--c-param)"></div>
+      <div class="seg" style="width:4.17%;background:var(--c-out)"></div>
+      <div class="seg" style="width:0.52%;background:var(--c-guard)"></div>
+    </div>
+    <p class="cap">State bank 262,144 B ｜ q/k/v 49,152 ｜ gate 32,768 ｜ beta 2,048 ｜ 参数 1,088 ｜ out 16,384 ｜ guard 2,048 ｜ 余量 27,584</p>
+  </div>
+
+  <div class="card">
+    <div class="kpi"><b>A6 · FP32 K-first · X=16 · 4 bank（带行间距）</b><span class="num">331,840 B / 393,216 B = 84.4%</span></div>
+    <div class="bar">
+      <div class="seg" style="width:70.83%;background:var(--c-bank)"></div>
+      <div class="seg" style="width:6.25%;background:var(--c-qkv)"></div>
+      <div class="seg" style="width:4.17%;background:var(--c-gate)"></div>
+      <div class="seg" style="width:0.26%;background:var(--c-beta)"></div>
+      <div class="seg" style="width:0.28%;background:var(--c-param)"></div>
+      <div class="seg" style="width:2.08%;background:var(--c-out)"></div>
+      <div class="seg" style="width:0.52%;background:var(--c-guard)"></div>
+    </div>
+    <p class="cap">State bank 278,528 B（每 bank 128×136×4B）｜ q/k/v 24,576 ｜ gate 16,384 ｜ beta 1,024 ｜ 参数 1,088 ｜ out 8,192 ｜ guard 2,048 ｜ 余量 61,376</p>
+  </div>
+
+  <div class="legend">
+    <span><i style="background:var(--c-bank)"></i>State bank</span>
+    <span><i style="background:var(--c-qkv)"></i>q / k / v 双槽</span>
+    <span><i style="background:var(--c-gate)"></i>gate 双槽</span>
+    <span><i style="background:var(--c-beta)"></i>beta 双槽</span>
+    <span><i style="background:var(--c-param)"></i>参数双槽</span>
+    <span><i style="background:var(--c-out)"></i>out 双槽</span>
+    <span><i style="background:var(--c-guard)"></i>guard</span>
+    <span><i style="background:var(--c-free)"></i>未使用</span>
+  </div>
+
+  <table>
+    <thead><tr><th>元素</th><th>A5（X=8, 3 bank）</th><th>A6 BF16（X=32, 4 bank）</th><th>A6 FP32 K-first（X=16, 4 bank）</th></tr></thead>
+    <tbody>
+      <tr><td>State bank</td><td class="num">196,608</td><td class="num">262,144</td><td class="num">278,528</td></tr>
+      <tr><td>q / k / v（双槽）</td><td class="num">12,288</td><td class="num">49,152</td><td class="num">24,576</td></tr>
+      <tr><td>gate（双槽）</td><td class="num">8,192</td><td class="num">32,768</td><td class="num">16,384</td></tr>
+      <tr><td>beta（双槽）</td><td class="num">512</td><td class="num">2,048</td><td class="num">1,024</td></tr>
+      <tr><td>参数（A_log + dt_bias）</td><td class="num">1,088</td><td class="num">1,088</td><td class="num">1,088</td></tr>
+      <tr><td>out（双槽）</td><td class="num">4,096</td><td class="num">16,384</td><td class="num">8,192</td></tr>
+      <tr><td>guard（含 VF scratch）</td><td class="num">2,048</td><td class="num">2,048</td><td class="num">2,048</td></tr>
+      <tr><td><b>合计 / 占比</b></td><td class="num"><b>224,832 / 88.5%</b></td><td class="num"><b>365,632 / 93.0%</b></td><td class="num"><b>331,840 / 84.4%</b></td></tr>
+    </tbody>
+  </table>
+  <p class="cap">每 token 的双槽占用 = q/k/v 3×512 + gate 1024 + beta 64 + out 512 = 3136 B；窗口翻倍只放大这一项，State bank 与固定项不变。</p>
+
+  <div class="note">
+    <b>为什么 FP32 K-first 不把窗口也放到 32？</b>
+    它的 bank 需要 32B 行间距（128×136），4 bank 共多出 16KB；若窗口取 32，总量变成
+    <b>382,016 B（97.2%）</b>，只剩 11,200B 余量，平台再保留一点 UB 就会 tiling 失败。因此该布局固定 X=16。
+  </div>
+
+  <h2>4. 三发射：A6 到底多做了什么</h2>
+
+  <p>三发射不是“多写一条指令”，而是同一拍里能放 <b>1 条长指令 + 2 条短指令</b>。
+    一个 4 行块里的指令构成是固定的：短指令约 40 条（载入、decay、乘加、outer、S@q），
+    长指令 8 条（4 次 <code>S@k</code> 归约 + 4 次 <code>S@q</code> 归约；gate/sigmoid 路径还会多出 Exp/Ln/Div）。
+    关键条件是这些短指令必须来自<b>不同行</b>——代码里的“4 行 × 每行 2 段”正好给出 8 条独立短流。</p>
+
+  <div class="card">
+    <div class="issue">
+      <div class="issue-row">
+        <span>A5 双发射</span>
+        <div class="issue-track">
+          <div class="issue-short" style="width:83%"></div>
+          <div class="issue-long" style="width:17%"></div>
+        </div>
+      </div>
+      <div class="issue-row">
+        <span>A6 三发射</span>
+        <div class="issue-track">
+          <div class="issue-short" style="width:71%"></div>
+          <div class="issue-long" style="width:29%"></div>
+        </div>
+      </div>
+    </div>
+    <p class="cap">按“块时间”归一化：A5 短槽 40 拍是瓶颈（长槽只占 8 拍）；A6 短槽 20 拍、长槽 8 拍，块时间由短槽主导降到约 20 拍。
+      这只是上限，真实收益取决于编译器能否把 8 条短流交错到 2 个短槽里，需要用 profiler 看 <code>ReduceSum</code> 占比与短指令双发率。</p>
+  </div>
+
+  <h2>5. 理论收益与代价</h2>
+
+  <div class="grid g3">
+    <div class="card">
+      <h3>稳态 token：不变</h3>
+      <p>每 token 的 state 读/写（BF16 32+32KiB，FP32 64+64KiB）与 128 行向量指令不会因为 UB 变大或窗口变大而减少。</p>
+    </div>
+    <div class="card">
+      <h3>tile 固定开销：约减半</h3>
+      <p>每 tile 有 5 条输入 DMA、1 条 out DMA、4 次 Mutex 操作和若干标量分支，约 1.0–1.5K 拍。
+        窗口 16→32 后 tile 数减半，固定开销占比从 6–9% 降到 3–4.5%，<b>长序列约回收 3–4%</b>。</p>
+    </div>
+    <div class="card">
+      <h3>落盘路径：多一份快照</h3>
+      <p>有 <code>ssm_state_indices</code> 时 MTE3 每 token 写一份状态快照；第 4 个 bank 让在飞快照从 2 份变成 3 份，
+        减少“旧快照未回写就复用 bank”的等待。</p>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>已评估但未采用</th><th>原因（带数字）</th></tr></thead>
+    <tbody>
+      <tr><td>State bank 4→5</td><td>BF16 可放下，但 FP32 K-first 需要 401KB，超过 384KB；收益只在落盘路径</td></tr>
+      <tr><td>输入槽 2→3/4</td><td>tile 首个 token 就预取下一 tile，计算时间足以覆盖 DMA；多开只占 UB</td></tr>
+      <tr><td>out 槽 2→4</td><td>out 每 tile 仅 8KiB，MTE3 已被计算完全掩盖</td></tr>
+      <tr><td>行块 4→8</td><td>需要 16 State + 16 乘积 + 8 delta 寄存器，超过预算会 spill</td></tr>
+      <tr><td>2 token / VF</td><td>两 token 的 k/q/gate/beta 常量必须同时驻留，短指令总数反而增加</td></tr>
+      <tr><td>X=64</td><td>BF16 需 428KB、FP32 K-first 需 445KB，均超 384KB</td></tr>
+      <tr><td>K-first FP32 X=32</td><td>占用 97.2%，余量 11,200B，平台保留区变化就会失败</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 验证清单</h2>
+
+  <div class="good">
+    <ul>
+      <li>编译：<code>build.sh --pkg --soc=ascend960dt --ops=recurrent_kda</code>，确认四个 <code>KERNEL_MODE</code> 实例产出。</li>
+      <li>日志：BF16 / FP32-V-first 为 <code>windowSize=32</code>、<code>ubRestBytes=365632</code>；
+          FP32 K-first 为 <code>windowSize=16</code>、<code>ubRestBytes=331840</code>；<code>stateOutBufferNum=4</code>。</li>
+      <li>功能：<code>atk_recurrent_kda_a6.json</code>（130 条，S=1…1024，含 31/32/33 窗口边界、空段、padding、slot 索引）。</li>
+      <li>性能：msprof 对比 X=16 与 X=32 的 Task Duration（重点 T≥257），并观察短指令双发率与 <code>ReduceSum</code> 占比。</li>
+      <li>同步：<code>-scope=determinism</code> 与 <code>-scope=mssanitizer</code>，覆盖末 token 初态预取与逐 token 快照在飞。</li>
+    </ul>
+  </div>
+
+  <p class="sub" style="margin-top:28px">
+    相关文件：<span class="mono">op_kernel/arch92/recurrent_kda.h</span>、<span class="mono">recurrent_kda_vec.h</span>、
+    <span class="mono">recurrent_kda_struct.h</span>、<span class="mono">op_host/recurrent_kda_tiling_processor.h</span>；
+    技术细节版见同目录 <span class="mono">design_960dt.md</span>。
+  </p>
+
+</div>
+</body>
+</html>

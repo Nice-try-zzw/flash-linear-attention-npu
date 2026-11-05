@@ -2,6 +2,7 @@
 
 > 基线：PR #997（分支 `codex/recurrent-kda-x8-pr`）的 A5 新实现（静态 UB + 资源 Mutex + 逐 token VF）。
 > A6 由同一套代码在 `arch92/` 上按架构常量特化；通用语义见 [design.md](./design.md)。
+> 面向评审的可视化简明版（含 UB 切分条形图）见 [a6-optimization-detail.html](./a6-optimization-detail.html)。
 
 ## 1. 结论速览
 
