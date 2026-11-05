@@ -44,9 +44,12 @@ state 存储口径，实际平台由 `-soc` 指定。
 | `atk_recurrent_kda_mss.json` | 11 | short/window/tail/transpose/slots/packed/fallback/独立 batch stride |
 | `atk_recurrent_kda_alignment.json` | 54 | 方案对齐用例 |
 | `atk_recurrent_kda_longseq.json` / `_mss.json` | 独立包 | `executor_recurrent_kda_longseq.py` 使用，覆盖每段 9…1024 |
+| `atk_recurrent_kda_a6.json` | 结构矩阵生成的 A6 场景包 | `generate_a5_recurrent_kda_cases.py` 生成：B=1…64、S=1…1024（覆盖 16-token 窗口边界）、dense/均匀/ragged/padding/单段长序列/大量超短段，以及 state 布局、gate 分支、slot 索引、QKV view 等 |
 | `atk_recurrent_kda_a5.json` | 历史 A5 短序列包 | `executor_recurrent_kda_a5.py` 使用 |
 
-`python tests/atk/recurrent_kda/gen_recurrent_kda.py` 可重建正式包与新增对齐包。
+`python tests/atk/recurrent_kda/gen_recurrent_kda.py` 可重建正式包与新增对齐包；
+`python tests/atk/recurrent_kda/generate_a5_recurrent_kda_cases.py --soc ascend960dt`
+按结构矩阵重建 A6 场景包（默认输出 `atk_recurrent_kda_a6.json`，`--soc ascend950` 可生成 A5 版本）。
 
 ## 默认用例
 
