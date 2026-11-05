@@ -707,89 +707,109 @@ private:
                     Add(x31, x31, bias1, pregFull);
                 }
                 if (safeGate_) {
-                    // exp(A) * (g + dt_bias) 取负后送 softplus：两步 Muls 折叠成一步（逐位等价）。
+                    // 两波调度：wave0（行 0/1）先送 Exp，wave1（行 2/3）的 Muls 落在
+                    // Exp 的长指令窗口里；Div 同理。避免 8 条长指令连成一串。
                     Muls(x00, x00, -expA, pregFull);
                     Muls(x01, x01, -expA, pregFull);
                     Muls(x10, x10, -expA, pregFull);
                     Muls(x11, x11, -expA, pregFull);
-                    Muls(x20, x20, -expA, pregFull);
-                    Muls(x21, x21, -expA, pregFull);
-                    Muls(x30, x30, -expA, pregFull);
-                    Muls(x31, x31, -expA, pregFull);
                     Exp(x00, x00, pregFull);
                     Exp(x01, x01, pregFull);
                     Exp(x10, x10, pregFull);
                     Exp(x11, x11, pregFull);
+
+                    Muls(x20, x20, -expA, pregFull);
+                    Muls(x21, x21, -expA, pregFull);
+                    Muls(x30, x30, -expA, pregFull);
+                    Muls(x31, x31, -expA, pregFull);
                     Exp(x20, x20, pregFull);
                     Exp(x21, x21, pregFull);
                     Exp(x30, x30, pregFull);
                     Exp(x31, x31, pregFull);
+
                     Adds(x00, x00, 1.0f, pregFull);
                     Adds(x01, x01, 1.0f, pregFull);
                     Adds(x10, x10, 1.0f, pregFull);
                     Adds(x11, x11, 1.0f, pregFull);
-                    Adds(x20, x20, 1.0f, pregFull);
-                    Adds(x21, x21, 1.0f, pregFull);
-                    Adds(x30, x30, 1.0f, pregFull);
-                    Adds(x31, x31, 1.0f, pregFull);
                     Div(x00, one, x00, pregFull);
                     Div(x01, one, x01, pregFull);
                     Div(x10, one, x10, pregFull);
                     Div(x11, one, x11, pregFull);
-                    Div(x20, one, x20, pregFull);
-                    Div(x21, one, x21, pregFull);
-                    Div(x30, one, x30, pregFull);
-                    Div(x31, one, x31, pregFull);
-                    Muls(x00, x00, lowerBound_, pregFull);
-                    Muls(x01, x01, lowerBound_, pregFull);
-                    Muls(x10, x10, lowerBound_, pregFull);
-                    Muls(x11, x11, lowerBound_, pregFull);
-                    Muls(x20, x20, lowerBound_, pregFull);
-                    Muls(x21, x21, lowerBound_, pregFull);
-                    Muls(x30, x30, lowerBound_, pregFull);
-                    Muls(x31, x31, lowerBound_, pregFull);
-                } else {
-                    Exp(x00, x00, pregFull);
-                    Exp(x01, x01, pregFull);
-                    Exp(x10, x10, pregFull);
-                    Exp(x11, x11, pregFull);
-                    Exp(x20, x20, pregFull);
-                    Exp(x21, x21, pregFull);
-                    Exp(x30, x30, pregFull);
-                    Exp(x31, x31, pregFull);
-                    Adds(x00, x00, 1.0f, pregFull);
-                    Adds(x01, x01, 1.0f, pregFull);
-                    Adds(x10, x10, 1.0f, pregFull);
-                    Adds(x11, x11, 1.0f, pregFull);
+
                     Adds(x20, x20, 1.0f, pregFull);
                     Adds(x21, x21, 1.0f, pregFull);
                     Adds(x30, x30, 1.0f, pregFull);
                     Adds(x31, x31, 1.0f, pregFull);
+                    Div(x20, one, x20, pregFull);
+                    Div(x21, one, x21, pregFull);
+                    Div(x30, one, x30, pregFull);
+                    Div(x31, one, x31, pregFull);
+
+                    Muls(x00, x00, lowerBound_, pregFull);
+                    Muls(x01, x01, lowerBound_, pregFull);
+                    Muls(x10, x10, lowerBound_, pregFull);
+                    Muls(x11, x11, lowerBound_, pregFull);
+                    DataCopy(gateAddr + rowOffset, x00, pregFull);
+                    DataCopy(gateAddr + rowOffset + V_LENGTH, x01, pregFull);
+                    DataCopy(gateAddr + rowOffset + alignK_, x10, pregFull);
+                    DataCopy(gateAddr + rowOffset + alignK_ + V_LENGTH, x11, pregFull);
+
+                    Muls(x20, x20, lowerBound_, pregFull);
+                    Muls(x21, x21, lowerBound_, pregFull);
+                    Muls(x30, x30, lowerBound_, pregFull);
+                    Muls(x31, x31, lowerBound_, pregFull);
+                    DataCopy(gateAddr + rowOffset + 2 * alignK_, x20, pregFull);
+                    DataCopy(gateAddr + rowOffset + 2 * alignK_ + V_LENGTH, x21, pregFull);
+                    DataCopy(gateAddr + rowOffset + 3 * alignK_, x30, pregFull);
+                    DataCopy(gateAddr + rowOffset + 3 * alignK_ + V_LENGTH, x31, pregFull);
+                } else {
+                    // 两波调度：wave0/wave1 的 Exp 先发，wave1 的 Adds/Ln 填 wave0 的长窗口。
+                    Exp(x00, x00, pregFull);
+                    Exp(x01, x01, pregFull);
+                    Exp(x10, x10, pregFull);
+                    Exp(x11, x11, pregFull);
+
+                    Exp(x20, x20, pregFull);
+                    Exp(x21, x21, pregFull);
+                    Exp(x30, x30, pregFull);
+                    Exp(x31, x31, pregFull);
+
+                    Adds(x00, x00, 1.0f, pregFull);
+                    Adds(x01, x01, 1.0f, pregFull);
+                    Adds(x10, x10, 1.0f, pregFull);
+                    Adds(x11, x11, 1.0f, pregFull);
                     Ln(x00, x00, pregFull);
                     Ln(x01, x01, pregFull);
                     Ln(x10, x10, pregFull);
                     Ln(x11, x11, pregFull);
+
+                    Adds(x20, x20, 1.0f, pregFull);
+                    Adds(x21, x21, 1.0f, pregFull);
+                    Adds(x30, x30, 1.0f, pregFull);
+                    Adds(x31, x31, 1.0f, pregFull);
                     Ln(x20, x20, pregFull);
                     Ln(x21, x21, pregFull);
                     Ln(x30, x30, pregFull);
                     Ln(x31, x31, pregFull);
+
                     Muls(x00, x00, -expA, pregFull);
                     Muls(x01, x01, -expA, pregFull);
                     Muls(x10, x10, -expA, pregFull);
                     Muls(x11, x11, -expA, pregFull);
+                    DataCopy(gateAddr + rowOffset, x00, pregFull);
+                    DataCopy(gateAddr + rowOffset + V_LENGTH, x01, pregFull);
+                    DataCopy(gateAddr + rowOffset + alignK_, x10, pregFull);
+                    DataCopy(gateAddr + rowOffset + alignK_ + V_LENGTH, x11, pregFull);
+
                     Muls(x20, x20, -expA, pregFull);
                     Muls(x21, x21, -expA, pregFull);
                     Muls(x30, x30, -expA, pregFull);
                     Muls(x31, x31, -expA, pregFull);
+                    DataCopy(gateAddr + rowOffset + 2 * alignK_, x20, pregFull);
+                    DataCopy(gateAddr + rowOffset + 2 * alignK_ + V_LENGTH, x21, pregFull);
+                    DataCopy(gateAddr + rowOffset + 3 * alignK_, x30, pregFull);
+                    DataCopy(gateAddr + rowOffset + 3 * alignK_ + V_LENGTH, x31, pregFull);
                 }
-                DataCopy(gateAddr + rowOffset, x00, pregFull);
-                DataCopy(gateAddr + rowOffset + V_LENGTH, x01, pregFull);
-                DataCopy(gateAddr + rowOffset + alignK_, x10, pregFull);
-                DataCopy(gateAddr + rowOffset + alignK_ + V_LENGTH, x11, pregFull);
-                DataCopy(gateAddr + rowOffset + 2 * alignK_, x20, pregFull);
-                DataCopy(gateAddr + rowOffset + 2 * alignK_ + V_LENGTH, x21, pregFull);
-                DataCopy(gateAddr + rowOffset + 3 * alignK_, x30, pregFull);
-                DataCopy(gateAddr + rowOffset + 3 * alignK_ + V_LENGTH, x31, pregFull);
             }
             // 尾部 0~3 行：单行完成，数值路径与行块一致。
             for (uint16_t row = static_cast<uint16_t>(quadNum * A6_GATE_ROW_BLOCK); row < rowNum; ++row) {
@@ -1227,46 +1247,48 @@ private:
                 DataCopy(s21, stateAddr + rowOffset + 2 * alignK_ + V_LENGTH);
                 DataCopy(s30, stateAddr + rowOffset + 3 * alignK_);
                 DataCopy(s31, stateAddr + rowOffset + 3 * alignK_ + V_LENGTH);
-                // decay: state *= gate，两段各乘对应的 gate 半段
+                // 行内交织：每行“2 条衰减 + 2 条乘加 + 1 条长归约”，下一行的短指令
+                // 正好落在上一行 ReduceSum 的等待窗口里，避免 4 条长指令扎堆发射。
                 Mul(s00, s00, gate0, pregFull);
                 Mul(s01, s01, gate1, pregFull);
-                Mul(s10, s10, gate0, pregFull);
-                Mul(s11, s11, gate1, pregFull);
-                Mul(s20, s20, gate0, pregFull);
-                Mul(s21, s21, gate1, pregFull);
-                Mul(s30, s30, gate0, pregFull);
-                Mul(s31, s31, gate1, pregFull);
-                // 预测 dot = state·k：Mul + MulAddDst 折叠两段，4 行 4 条独立短指令流
                 Mul(p0, s00, k0, pregFull);
                 MulAddDst(p0, s01, k1, pregFull);
+                ReduceSum(d0, p0, pregFull);
+
+                Mul(s10, s10, gate0, pregFull);
+                Mul(s11, s11, gate1, pregFull);
                 Mul(p1, s10, k0, pregFull);
                 MulAddDst(p1, s11, k1, pregFull);
+                ReduceSum(d1, p1, pregFull);
+
+                Mul(s20, s20, gate0, pregFull);
+                Mul(s21, s21, gate1, pregFull);
                 Mul(p2, s20, k0, pregFull);
                 MulAddDst(p2, s21, k1, pregFull);
+                ReduceSum(d2, p2, pregFull);
+
+                Mul(s30, s30, gate0, pregFull);
+                Mul(s31, s31, gate1, pregFull);
                 Mul(p3, s30, k0, pregFull);
                 MulAddDst(p3, s31, k1, pregFull);
-                // 4 条长指令：4 行整行归约，与随后的 v 广播/标量短指令并行
-                ReduceSum(d0, p0, pregFull);
-                ReduceSum(d1, p1, pregFull);
-                ReduceSum(d2, p2, pregFull);
                 ReduceSum(d3, p3, pregFull);
-                // delta = (v - dot) * beta：整条链只占 VL1
+                // v 广播：只依赖 vAddr，放在最后一个长归约之后，填充其等待窗口
                 DataCopy<float, LoadDist::DIST_BRC_B32>(p0, vAddr + row0);
                 DataCopy<float, LoadDist::DIST_BRC_B32>(p1, vAddr + row0 + 1);
                 DataCopy<float, LoadDist::DIST_BRC_B32>(p2, vAddr + row0 + 2);
                 DataCopy<float, LoadDist::DIST_BRC_B32>(p3, vAddr + row0 + 3);
+                // 标量链按行收口：每行 3 条 VL1 短指令后立刻广播，行与行之间无依赖
                 Sub(d0, p0, d0, pregFirst);
-                Sub(d1, p1, d1, pregFirst);
-                Sub(d2, p2, d2, pregFirst);
-                Sub(d3, p3, d3, pregFirst);
                 Mul(d0, d0, beta, pregFirst);
-                Mul(d1, d1, beta, pregFirst);
-                Mul(d2, d2, beta, pregFirst);
-                Mul(d3, d3, beta, pregFirst);
-                // 寄存器内广播 delta，取代 A5 的 "UB 标量回写 + DIST_BRC 读回"
                 Duplicate(p0, d0, pregFull);
+                Sub(d1, p1, d1, pregFirst);
+                Mul(d1, d1, beta, pregFirst);
                 Duplicate(p1, d1, pregFull);
+                Sub(d2, p2, d2, pregFirst);
+                Mul(d2, d2, beta, pregFirst);
                 Duplicate(p2, d2, pregFull);
+                Sub(d3, p3, d3, pregFirst);
+                Mul(d3, d3, beta, pregFirst);
                 Duplicate(p3, d3, pregFull);
                 // state += delta⊗k，两段各一条 MulAddDst
                 MulAddDst(s00, p0, k0, pregFull);
@@ -1277,32 +1299,34 @@ private:
                 MulAddDst(s21, p2, k1, pregFull);
                 MulAddDst(s30, p3, k0, pregFull);
                 MulAddDst(s31, p3, k1, pregFull);
-                // o = state·q，直接用更新后的 state 寄存器，避免二次读 UB
+                // 读出按行交织：每行“2 条乘加 + 1 条长归约 + 2 条状态写回”，
+                // attn 首元素写延迟一行，确保长归约结果已经就绪。
                 Mul(p0, s00, q0, pregFull);
                 MulAddDst(p0, s01, q1, pregFull);
-                Mul(p1, s10, q0, pregFull);
-                MulAddDst(p1, s11, q1, pregFull);
-                Mul(p2, s20, q0, pregFull);
-                MulAddDst(p2, s21, q1, pregFull);
-                Mul(p3, s30, q0, pregFull);
-                MulAddDst(p3, s31, q1, pregFull);
-                // 状态只回写一次（更新后的值），省掉 decayed state 的中间回写
+                ReduceSum(d0, p0, pregFull);
                 DataCopy(stateAddr + rowOffset, s00, pregFull);
                 DataCopy(stateAddr + rowOffset + V_LENGTH, s01, pregFull);
+
+                Mul(p1, s10, q0, pregFull);
+                MulAddDst(p1, s11, q1, pregFull);
+                ReduceSum(d1, p1, pregFull);
                 DataCopy(stateAddr + rowOffset + alignK_, s10, pregFull);
                 DataCopy(stateAddr + rowOffset + alignK_ + V_LENGTH, s11, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row0, d0, pregFirst);
+
+                Mul(p2, s20, q0, pregFull);
+                MulAddDst(p2, s21, q1, pregFull);
+                ReduceSum(d2, p2, pregFull);
                 DataCopy(stateAddr + rowOffset + 2 * alignK_, s20, pregFull);
                 DataCopy(stateAddr + rowOffset + 2 * alignK_ + V_LENGTH, s21, pregFull);
+                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row0 + 1, d1, pregFirst);
+
+                Mul(p3, s30, q0, pregFull);
+                MulAddDst(p3, s31, q1, pregFull);
+                ReduceSum(d3, p3, pregFull);
                 DataCopy(stateAddr + rowOffset + 3 * alignK_, s30, pregFull);
                 DataCopy(stateAddr + rowOffset + 3 * alignK_ + V_LENGTH, s31, pregFull);
-                // 4 条长指令 + 每行一次首元素回写：长指令的等待窗口由其余行的短指令填充
-                ReduceSum(d0, p0, pregFull);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row0, d0, pregFirst);
-                ReduceSum(d1, p1, pregFull);
-                DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row0 + 1, d1, pregFirst);
-                ReduceSum(d2, p2, pregFull);
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row0 + 2, d2, pregFirst);
-                ReduceSum(d3, p3, pregFull);
                 DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(attnAddr + row0 + 3, d3, pregFirst);
             }
             // 尾部 0~3 行：单行完成，数值路径与行块一致
