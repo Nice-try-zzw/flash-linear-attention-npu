@@ -759,9 +759,52 @@ private:
         return candidate.vStep > current.vStep;
     }
 
-    // A6(ascend960dt) 384KB：vStep 一旦覆盖整个 V 轴，repeatTime 已到下限，剩余 UB 继续用于
-    // 加厚输出 ring（attn 每级 2*vStep 字节，state 每级 stateDtypeSize*aDk*vStep 字节），
-    // 让 MTE3 写回与下一个 token 的向量计算重叠，而不是把余量浪费在超采样 vStep 上。
+    // A6(960dt) 候选排序：K-first 时把"state 输出 ring 达到 2 级"提到 repeat 之前；
+    // V-first 仍以 repeat 为先（写回没有强制同步，ring==1 的代价只有一次整 tile Cast 的等待）。
+    //
+    // 依据（K-first 的 state 写回路径，`stateVFirst == 0`）：
+    //   - ring == 1：`CopyOutState` 在 `TransposeVFirstToKFirst` 之后必须立刻 `SyncMte3ToV`
+    //     等待写回完成（转置 scratch 是全程共享的），于是每个 token 变成 "VF + MTE3 串行"；
+    //   - ring == 2：kernel 的 pending 机制把上一 token 的写回推迟到下一 token 的 VF 之后发射，
+    //     每个 token 变成 max(VF, MTE3)，写回被藏到计算背后。
+    // 代价端：多一次 repeat 只增加 tile 级固定开销（一次 VF 进入 + 一次 state tile 预取 +
+    // 每 token 一次 q/k/gate/beta 常量载入），相对每 token 的 VF/MTE3 周期可忽略。
+    // 例：K=128/V=128/FP32 state + ssm_state_indices（逐 token 落盘）时，旧排序落在
+    // (repeat=1, ring 1/2)，新排序落在 (repeat=2, vStep=64, ring 2/2)，把每 token 的
+    // "VF + MTE3 串行" 变成两者重叠。
+    //
+    // 无 ssm_state_indices 时 kernel 只写最后一个 token（中间态必然被覆盖），state ring
+    // 深度不再决定重叠效果，因此回到"repeat 优先"，把 384KB 用在更大的 vStep 上。
+    bool IsBetterProfileA6(const BufferProfile &candidate, const BufferProfile &current) const
+    {
+        if (!current.valid) {
+            return true;
+        }
+        const bool perTokenStateWrite =
+            ctx_.hasSsmStateIndices != 0 && (ctx_.inplaceFinalState != 0 || ctx_.outputFinalState != 0);
+        if (ctx_.stateVFirst == 0 && perTokenStateWrite) {
+            const bool candidateStateDeep = candidate.stateOutBufferNum >= RKDA_MAX_OUT_BUFFER_NUM;
+            const bool currentStateDeep = current.stateOutBufferNum >= RKDA_MAX_OUT_BUFFER_NUM;
+            if (candidateStateDeep != currentStateDeep) {
+                return candidateStateDeep;
+            }
+        }
+        if (candidate.repeatTime != current.repeatTime) {
+            return candidate.repeatTime < current.repeatTime;
+        }
+        if (candidate.stateOutBufferNum != current.stateOutBufferNum) {
+            return candidate.stateOutBufferNum > current.stateOutBufferNum;
+        }
+        if (candidate.attnOutBufferNum != current.attnOutBufferNum) {
+            return candidate.attnOutBufferNum > current.attnOutBufferNum;
+        }
+        return candidate.vStep > current.vStep;
+    }
+
+    // A6(ascend960dt) 384KB：候选表 + `IsBetterProfileA6` 已经把"state ring 2"作为第一优先级；
+    // 这里是兜底：若某形状在任何候选下都拿不到 ring 2，就用真实剩余量继续加厚 ring。
+    //   attn 每级 2*vStep 字节（outType=bf16），state 每级 stateDtypeSize*aDk*vStep 字节。
+    // 加深后 `ubRestBytes` 用更新过的 `queueCoeff` 重算，保证仍然非负。
     void DeepenOutRingForA6(int64_t ubSize, int64_t aDk,
                             const RecurrentKdaTilingData &tiling, BufferProfile &profile) const
     {
@@ -817,8 +860,14 @@ private:
                                        candidate.attnOutBufferNum, tiling, profile)) {
                 continue;
             }
-            if (IsBetterProfile(profile, selected)) {
-                selected = profile;
+            if (ctx_.isA6 != 0) {
+                if (IsBetterProfileA6(profile, selected)) {
+                    selected = profile;
+                }
+            } else {
+                if (IsBetterProfile(profile, selected)) {
+                    selected = profile;
+                }
             }
         }
 

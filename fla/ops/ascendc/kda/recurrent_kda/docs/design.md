@@ -141,7 +141,9 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 3. 按 Q/K/V 各自 token/head stride 计算 GM 首地址并二维搬运到紧凑 UB；随后按属性执行 q/k
    normalize、raw gate 转换和 beta sigmoid。
 4. 对状态做 gate decay，计算 `S @ k`、delta 和 outer 更新。
-5. 计算 `S @ q` 写回 `out`，并把状态原位写回命中的 state pool 槽。
+5. 计算 `S @ q` 写回 `out`，并把状态原位写回命中的 state pool 槽。A6 在无 `ssm_state_indices`
+   时同一 `(batch, head)` 任务的所有 token 命中同一槽，中间态写回会被后一个 token 覆盖，因此只写最后
+   一个 token（GM 落盘结果等价，见 960dt 专项设计 5.1）；有 `ssm_state_indices` 时仍逐 token 写回。
 
 ### 7.2 内存规划
 
@@ -187,9 +189,11 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 A6 在此基础上进一步：把 decay / `S@k` / delta / outer / `S@q` 收进单个 `__VEC_SCOPE__`，状态每 token
 只回写一次（UB 状态流量 2 读 2 写 → 1 读 1 写）；V 方向相邻 4 行按"行块 × 两段连续 64 lane"交织成
 8 条短指令流，并用 `MulAddDst` 折叠每行归约，使 `ReduceSum`/`Exp`/`Div` 等长指令与短指令同拍发射；
-标量链收敛到 `VL1` mask；q/k normalize 与 raw gate 改为整块 VF，去掉逐行 barrier 与 V→S 同步。
-A6 走独立实现，不保留回退 A5 的编译开关。
-详细设计与收益估算见 [design_960dt.md](./design_960dt.md)。后续优化仍应以状态搬运、向量流水和同步开销为重点。
+标量链收敛到 `VL1` mask；q/k normalize 与 raw gate 改为整块 VF，去掉逐行 barrier 与 V→S 同步；
+state 写回按语义合并（无 `ssm_state_indices` 时同一 `(batch, head)` 任务内只写最后一个 token，
+GM 结果逐位不变）；UB 切分对 state 布局与写回语义敏感（K-first 逐 token 落盘时优先保证输出 ring 深度 2）。
+A6 走独立实现，不保留回退 A5 的编译开关。详细设计与收益估算见 [design_960dt.md](./design_960dt.md)。
+后续优化仍应以状态搬运、向量流水和同步开销为重点。
 
 ## 11. 测试设计
 

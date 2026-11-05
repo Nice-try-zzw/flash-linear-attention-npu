@@ -54,6 +54,8 @@ constexpr uint32_t DATA_BLOCK_BYTES = 32;
 //   4. 标量链（beta sigmoid、delta、归一化 rstd）收敛到 VL1 mask 上，不再按 64 lane 发射。
 // 行块一次处理的行数：K 方向 128 列拆成两段 64 lane，4 行合计 8 条独立的短指令流。
 constexpr uint32_t A6_ROW_BLOCK = 4;
+// raw gate 变换的行块：每行两段 + 4 行 = 8 条短指令流，用于与 Exp / Ln / Div 长指令同拍。
+constexpr uint32_t A6_GATE_ROW_BLOCK = 4;
 // L2 归一化 epsilon：与 A2/A3、A5(arch35) 的 1e-6 口径一致，避免 A6 与 A5 出现数值分叉。
 constexpr float RKDA_L2_NORM_EPSILON = 1.0e-6F;
 
@@ -560,19 +562,17 @@ private:
                 DataCopy(r21, addr + rowOffset + 2 * alignK_ + V_LENGTH);
                 DataCopy(r30, addr + rowOffset + 3 * alignK_);
                 DataCopy(r31, addr + rowOffset + 3 * alignK_ + V_LENGTH);
-                // 4 行 × 两段：平方合并成每行一条 64 lane 的整行平方
+                // 4 行 × 两段：Mul + MulAddDst 把"平方 + 相加"折叠成两条短指令，
+                // 既减少短指令数，也把 "Mul->Add" 的两跳依赖压成一条 FMA
+                // （与 token 融合 VF 的归约折叠同一口径，单次舍入差 ≤1 ULP）。
                 Mul(sq0, r00, r00, pregFull);
-                Mul(nd0, r01, r01, pregFull);
-                Add(sq0, sq0, nd0, pregFull);
+                MulAddDst(sq0, r01, r01, pregFull);
                 Mul(sq1, r10, r10, pregFull);
-                Mul(nd1, r11, r11, pregFull);
-                Add(sq1, sq1, nd1, pregFull);
+                MulAddDst(sq1, r11, r11, pregFull);
                 Mul(sq2, r20, r20, pregFull);
-                Mul(nd2, r21, r21, pregFull);
-                Add(sq2, sq2, nd2, pregFull);
+                MulAddDst(sq2, r21, r21, pregFull);
                 Mul(sq3, r30, r30, pregFull);
-                Mul(nd3, r31, r31, pregFull);
-                Add(sq3, sq3, nd3, pregFull);
+                MulAddDst(sq3, r31, r31, pregFull);
                 // 4 条长指令：4 行的整行归约
                 ReduceSum(nd0, sq0, pregFull);
                 ReduceSum(nd1, sq1, pregFull);
@@ -617,8 +617,7 @@ private:
                 DataCopy(r00, addr + rowOffset);
                 DataCopy(r01, addr + rowOffset + V_LENGTH);
                 Mul(sq0, r00, r00, pregFull);
-                Mul(nd0, r01, r01, pregFull);
-                Add(sq0, sq0, nd0, pregFull);
+                MulAddDst(sq0, r01, r01, pregFull);
                 ReduceSum(nd0, sq0, pregFull);
                 Adds(nd0, nd0, RKDA_L2_NORM_EPSILON, pregFirst);
                 Sqrt(nd0, nd0, pregFirst);
@@ -658,21 +657,26 @@ private:
     }
 
     // A6：整块 gate 变换收进单个 VF。
-    // 每行的两段 64 lane 相互独立，再按两行一组交织成 4 条短指令流：
-    // Exp / Ln / Div 这类长指令落在当前行的当拍，另一行的 Muls / Adds 短指令与之并行。
+    // 每行的两段 64 lane 相互独立，再按 4 行一组交织成 8 条短指令流：
+    // Exp / Ln / Div 这类长指令只占"长指令槽"，另外 3 行同阶段的 Muls / Adds / DataCopy
+    // 短指令填满每拍的 2 个短指令槽，构成 960dt 的"1 长 + 2 短"三发形态。
     // 同时去掉 A5 实现里逐个原子操作之间的 PipeBarrier 以及逐行 dt_bias 加法后的 barrier。
     __aicore__ inline void ApplyGateInKernelVF(float expA, int32_t seqLen)
     {
         __ubuf__ float *gateAddr = (__ubuf__ float *)gateInUb.GetPhyAddr();
         __ubuf__ float *biasAddr = (__ubuf__ float *)broadTmpInUb.GetPhyAddr();
         uint16_t rowNum = static_cast<uint16_t>(seqLen);
-        uint16_t pairNum = static_cast<uint16_t>(rowNum >> 1);
+        uint16_t quadNum = static_cast<uint16_t>(rowNum / A6_GATE_ROW_BLOCK);
         __VEC_SCOPE__
         {
             RegTensor<float> x00;
             RegTensor<float> x01;
             RegTensor<float> x10;
             RegTensor<float> x11;
+            RegTensor<float> x20;
+            RegTensor<float> x21;
+            RegTensor<float> x30;
+            RegTensor<float> x31;
             RegTensor<float> bias0;
             RegTensor<float> bias1;
             RegTensor<float> one;
@@ -682,69 +686,114 @@ private:
                 DataCopy(bias0, biasAddr);
                 DataCopy(bias1, biasAddr + V_LENGTH);
             }
-            for (uint16_t i = 0; i < pairNum; ++i) {
-                uint32_t rowOffset = static_cast<uint32_t>(i) * 2 * alignK_;
+            for (uint16_t i = 0; i < quadNum; ++i) {
+                uint32_t rowOffset = static_cast<uint32_t>(i) * A6_GATE_ROW_BLOCK * alignK_;
                 DataCopy(x00, gateAddr + rowOffset);
                 DataCopy(x01, gateAddr + rowOffset + V_LENGTH);
                 DataCopy(x10, gateAddr + rowOffset + alignK_);
                 DataCopy(x11, gateAddr + rowOffset + alignK_ + V_LENGTH);
+                DataCopy(x20, gateAddr + rowOffset + 2 * alignK_);
+                DataCopy(x21, gateAddr + rowOffset + 2 * alignK_ + V_LENGTH);
+                DataCopy(x30, gateAddr + rowOffset + 3 * alignK_);
+                DataCopy(x31, gateAddr + rowOffset + 3 * alignK_ + V_LENGTH);
                 if (hasDtBias_) {
                     Add(x00, x00, bias0, pregFull);
                     Add(x01, x01, bias1, pregFull);
                     Add(x10, x10, bias0, pregFull);
                     Add(x11, x11, bias1, pregFull);
+                    Add(x20, x20, bias0, pregFull);
+                    Add(x21, x21, bias1, pregFull);
+                    Add(x30, x30, bias0, pregFull);
+                    Add(x31, x31, bias1, pregFull);
                 }
                 if (safeGate_) {
-                    Muls(x00, x00, expA, pregFull);
-                    Muls(x01, x01, expA, pregFull);
-                    Muls(x10, x10, expA, pregFull);
-                    Muls(x11, x11, expA, pregFull);
-                    Muls(x00, x00, -1.0f, pregFull);
-                    Muls(x01, x01, -1.0f, pregFull);
-                    Muls(x10, x10, -1.0f, pregFull);
-                    Muls(x11, x11, -1.0f, pregFull);
+                    // exp(A) * (g + dt_bias) 取负后送 softplus：两步 Muls 折叠成一步（逐位等价）。
+                    Muls(x00, x00, -expA, pregFull);
+                    Muls(x01, x01, -expA, pregFull);
+                    Muls(x10, x10, -expA, pregFull);
+                    Muls(x11, x11, -expA, pregFull);
+                    Muls(x20, x20, -expA, pregFull);
+                    Muls(x21, x21, -expA, pregFull);
+                    Muls(x30, x30, -expA, pregFull);
+                    Muls(x31, x31, -expA, pregFull);
                     Exp(x00, x00, pregFull);
                     Exp(x01, x01, pregFull);
                     Exp(x10, x10, pregFull);
                     Exp(x11, x11, pregFull);
+                    Exp(x20, x20, pregFull);
+                    Exp(x21, x21, pregFull);
+                    Exp(x30, x30, pregFull);
+                    Exp(x31, x31, pregFull);
                     Adds(x00, x00, 1.0f, pregFull);
                     Adds(x01, x01, 1.0f, pregFull);
                     Adds(x10, x10, 1.0f, pregFull);
                     Adds(x11, x11, 1.0f, pregFull);
+                    Adds(x20, x20, 1.0f, pregFull);
+                    Adds(x21, x21, 1.0f, pregFull);
+                    Adds(x30, x30, 1.0f, pregFull);
+                    Adds(x31, x31, 1.0f, pregFull);
                     Div(x00, one, x00, pregFull);
                     Div(x01, one, x01, pregFull);
                     Div(x10, one, x10, pregFull);
                     Div(x11, one, x11, pregFull);
+                    Div(x20, one, x20, pregFull);
+                    Div(x21, one, x21, pregFull);
+                    Div(x30, one, x30, pregFull);
+                    Div(x31, one, x31, pregFull);
                     Muls(x00, x00, lowerBound_, pregFull);
                     Muls(x01, x01, lowerBound_, pregFull);
                     Muls(x10, x10, lowerBound_, pregFull);
                     Muls(x11, x11, lowerBound_, pregFull);
+                    Muls(x20, x20, lowerBound_, pregFull);
+                    Muls(x21, x21, lowerBound_, pregFull);
+                    Muls(x30, x30, lowerBound_, pregFull);
+                    Muls(x31, x31, lowerBound_, pregFull);
                 } else {
                     Exp(x00, x00, pregFull);
                     Exp(x01, x01, pregFull);
                     Exp(x10, x10, pregFull);
                     Exp(x11, x11, pregFull);
+                    Exp(x20, x20, pregFull);
+                    Exp(x21, x21, pregFull);
+                    Exp(x30, x30, pregFull);
+                    Exp(x31, x31, pregFull);
                     Adds(x00, x00, 1.0f, pregFull);
                     Adds(x01, x01, 1.0f, pregFull);
                     Adds(x10, x10, 1.0f, pregFull);
                     Adds(x11, x11, 1.0f, pregFull);
+                    Adds(x20, x20, 1.0f, pregFull);
+                    Adds(x21, x21, 1.0f, pregFull);
+                    Adds(x30, x30, 1.0f, pregFull);
+                    Adds(x31, x31, 1.0f, pregFull);
                     Ln(x00, x00, pregFull);
                     Ln(x01, x01, pregFull);
                     Ln(x10, x10, pregFull);
                     Ln(x11, x11, pregFull);
+                    Ln(x20, x20, pregFull);
+                    Ln(x21, x21, pregFull);
+                    Ln(x30, x30, pregFull);
+                    Ln(x31, x31, pregFull);
                     Muls(x00, x00, -expA, pregFull);
                     Muls(x01, x01, -expA, pregFull);
                     Muls(x10, x10, -expA, pregFull);
                     Muls(x11, x11, -expA, pregFull);
+                    Muls(x20, x20, -expA, pregFull);
+                    Muls(x21, x21, -expA, pregFull);
+                    Muls(x30, x30, -expA, pregFull);
+                    Muls(x31, x31, -expA, pregFull);
                 }
                 DataCopy(gateAddr + rowOffset, x00, pregFull);
                 DataCopy(gateAddr + rowOffset + V_LENGTH, x01, pregFull);
                 DataCopy(gateAddr + rowOffset + alignK_, x10, pregFull);
                 DataCopy(gateAddr + rowOffset + alignK_ + V_LENGTH, x11, pregFull);
+                DataCopy(gateAddr + rowOffset + 2 * alignK_, x20, pregFull);
+                DataCopy(gateAddr + rowOffset + 2 * alignK_ + V_LENGTH, x21, pregFull);
+                DataCopy(gateAddr + rowOffset + 3 * alignK_, x30, pregFull);
+                DataCopy(gateAddr + rowOffset + 3 * alignK_ + V_LENGTH, x31, pregFull);
             }
-            // 尾部单行：行数为奇数时补齐最后一行。
-            if (rowNum > static_cast<uint16_t>(pairNum * 2)) {
-                uint32_t rowOffset = static_cast<uint32_t>(pairNum * 2) * alignK_;
+            // 尾部 0~3 行：单行完成，数值路径与行块一致。
+            for (uint16_t row = static_cast<uint16_t>(quadNum * A6_GATE_ROW_BLOCK); row < rowNum; ++row) {
+                uint32_t rowOffset = static_cast<uint32_t>(row) * alignK_;
                 DataCopy(x00, gateAddr + rowOffset);
                 DataCopy(x01, gateAddr + rowOffset + V_LENGTH);
                 if (hasDtBias_) {
@@ -752,10 +801,8 @@ private:
                     Add(x01, x01, bias1, pregFull);
                 }
                 if (safeGate_) {
-                    Muls(x00, x00, expA, pregFull);
-                    Muls(x01, x01, expA, pregFull);
-                    Muls(x00, x00, -1.0f, pregFull);
-                    Muls(x01, x01, -1.0f, pregFull);
+                    Muls(x00, x00, -expA, pregFull);
+                    Muls(x01, x01, -expA, pregFull);
                     Exp(x00, x00, pregFull);
                     Exp(x01, x01, pregFull);
                     Adds(x00, x00, 1.0f, pregFull);
@@ -1386,7 +1433,7 @@ private:
     }
 
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset,
-                                   uint64_t curVOffset, uint64_t betaOffset)
+                                   uint64_t curVOffset, uint64_t betaOffset, bool storeState)
     {
         if (alignK_ == TWO_V_LENGTH) {
             // A6：token 级融合 VF，decay / S@k / delta / outer / S@q 在同一个 __VEC_SCOPE__ 内完成。
@@ -1410,7 +1457,7 @@ private:
             ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
         }
         LocalTensor<outType> attnOutLocal = attnOutQueue_.AllocTensor<outType>();
-        if (shouldStoreState_) {
+        if (storeState) {
             LocalTensor<stateType> stateOutLocal = stateOutQueue_.AllocTensor<stateType>();
             if constexpr (std::is_same<stateType, float32_t>()) {
                 DataCopy(stateOutLocal, stateInUb, alignK_ * curSingleV);
@@ -1575,10 +1622,20 @@ private:
                 uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
                 uint64_t curStateOutSlot = curStateSlot;
+                // A6：state 落盘的语义是"任务结束时槽里的值"。没有 ssm_state_indices 时，
+                // StateSlotForToken 对同一任务的所有 token 都返回 batchIdx，state 写回地址完全相同，
+                // 中间态写回必然被后一个 token 的同地址写回覆盖 —— 只有最后一个 token 的写回可观测。
+                // 因此跳过中间态写回：GM 上的最终内容逐位不变，而每 (batch, head) 任务的 state MTE3
+                // 从 T 次降到 1 次（T<=8），把 state 写回从"每 token 一次 64KB/32KB"降为常数次。
+                // 有 ssm_state_indices 时每个 token 可能命中不同槽，保持逐 token 写回。
+                bool storeStateNow = shouldStoreState_;
+                if (storeStateNow && !hasSsmStateIndices_ && seq_i + 1 < seq1) {
+                    storeStateNow = false;
+                }
                 if (alignK_ != TWO_V_LENGTH) {
                     beta_ = LoadBeta(betaOffset);
                 }
-                Compute(curSingleV, curQKOffset, curVOffset, betaOffset);
+                Compute(curSingleV, curQKOffset, curVOffset, betaOffset, storeStateNow);
                 if (attnOutBufferNum_ == BUFFER_NUM) {
                     CopyOutAttn(attnOffset, curSingleV);
                 } else {
@@ -1588,7 +1645,7 @@ private:
                     pendingAttnOffset = attnOffset;
                     hasPendingAttn = true;
                 }
-                if (shouldStoreState_) {
+                if (storeStateNow) {
                     if (stateOutBufferNum_ == BUFFER_NUM) {
                         CopyOutState(curStateOutSlot, head_i, v_i, curSingleV);
                     } else {
