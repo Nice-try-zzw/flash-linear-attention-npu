@@ -749,11 +749,14 @@ private:
                             RKDA_A5_WINDOW_TOKENS, RKDA_A5_BANK_COUNT, "A5");
     }
 
-    // A6(ascend960dt)：384KB 预算下窗口 16、4 个 State bank（约 308KB / 320KB）。
+    // A6(ascend960dt)：384KB 预算；K-first FP32 的 bank 带行间距，窗口收回到 16，
+    // 其余布局用 32（约 93% UB），与 kernel 的 RKDAVectorContext::x_ 保持一致。
     ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
     {
         using namespace RecurrentKda;
-        return PlanStaticUb(tiling, ctx_.ubSize, RKDA_A6_WINDOW_TOKENS, RKDA_A6_BANK_COUNT, "A6");
+        const uint32_t x = (!ctx_.stateVFirst && ctx_.stateDtype == ge::DT_FLOAT) ?
+            RKDA_A6_WINDOW_TOKENS_KFIRST_FP32 : RKDA_A6_WINDOW_TOKENS;
+        return PlanStaticUb(tiling, ctx_.ubSize, x, RKDA_A6_BANK_COUNT, "A6");
     }
 
     int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const

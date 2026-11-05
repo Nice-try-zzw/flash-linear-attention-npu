@@ -14,8 +14,8 @@
 - `cu_seqlens` 可选；传入时为同设备 `INT32/INT64` tensor，shape 为 `[seq_num+1]`，首项为 `0`，末项不超过 token capacity，offset 单调不减。
 - `q/k/v/out` 仅支持 `BFLOAT16`；`g/beta` 支持 `FLOAT/BFLOAT16/FLOAT16`，state 支持 `FP32/BF16`，`A_log/dt_bias` 支持 `FLOAT`。
 - `HV % H == 0`；`K=128`，`V=128` 或 `V=256`。
-- A2/A3 支持多时间窗口长序列；**A5/A6 的 V=128 静态路径同样不限制每段长度**（A5 按 8-token、A6 按 16-token
-  窗口递推，状态驻留 UB），`V=256` 在 A5/A6 上仍走兼容路径，每段长度必须 <=8。
+- A2/A3 支持多时间窗口长序列；**A5/A6 的 V=128 静态路径同样不限制每段长度**（A5 按 8-token、A6 按 32-token
+  （FP32 K-first 16）窗口递推，状态驻留 UB），`V=256` 在 A5/A6 上仍走兼容路径，每段长度必须 <=8。
 - 显式 `ssm_state_indices` 可使 `state_capacity > seq_num`；Q/K/V 支持独立的合法 batch stride，
   不满足直接搬运条件时 aclnn 层回退连续化。
 
@@ -44,7 +44,7 @@ state 存储口径，实际平台由 `-soc` 指定。
 | `atk_recurrent_kda_mss.json` | 11 | short/window/tail/transpose/slots/packed/fallback/独立 batch stride |
 | `atk_recurrent_kda_alignment.json` | 54 | 方案对齐用例 |
 | `atk_recurrent_kda_longseq.json` / `_mss.json` | 独立包 | `executor_recurrent_kda_longseq.py` 使用，覆盖每段 9…1024 |
-| `atk_recurrent_kda_a6.json` | 结构矩阵生成的 A6 场景包 | `generate_a5_recurrent_kda_cases.py` 生成：B=1…64、S=1…1024（覆盖 16-token 窗口边界）、dense/均匀/ragged/padding/单段长序列/大量超短段，以及 state 布局、gate 分支、slot 索引、QKV view 等 |
+| `atk_recurrent_kda_a6.json` | 结构矩阵生成的 A6 场景包 | `generate_a5_recurrent_kda_cases.py` 生成：B=1…64、S=1…1024（覆盖 32/16-token 窗口边界）、dense/均匀/ragged/padding/单段长序列/大量超短段，以及 state 布局、gate 分支、slot 索引、QKV view 等 |
 | `atk_recurrent_kda_a5.json` | 历史 A5 短序列包 | `executor_recurrent_kda_a5.py` 使用 |
 
 `python tests/atk/recurrent_kda/gen_recurrent_kda.py` 可重建正式包与新增对齐包；
@@ -79,9 +79,9 @@ bash tests/atk/run_test_cpu.sh -op=recurrent_kda -scope=gen_cases
 
 ## A6（ascend960dt）适配说明
 
-- A6 走 `op_kernel/arch92/`（与 A5 同一套算法，按架构常量特化）：384KB UB 下窗口 16、State bank 4；
+- A6 走 `op_kernel/arch92/`（与 A5 同一套算法，按架构常量特化）：384KB UB 下窗口 32（FP32 K-first 16）、State bank 4；
   用例侧通过 `-soc=ascend960dt`（或 `-soc=a6`）选择，不需要额外参数。
-- A6 的 V=128 路径支持超过 `RKDA_MAX_MTP=8` 的长序列（16-token 窗口递推、状态驻留 UB），
+- A6 的 V=128 路径支持超过 `RKDA_MAX_MTP=8` 的长序列（32/16-token 窗口递推、状态驻留 UB），
   因此 `atk_recurrent_kda_longseq.json`、`atk_recurrent_kda_longseq_mss.json` 中以 `V=128` 为目标的长序列
   用例可在 A6 上执行；`V=256` 的长序列仍只覆盖 A2/A3 的多时间窗口路径，不应在 A6 上作为通过项。
 - 分支覆盖：A5/A6 的静态 VF 只对 `K=128` 生效；`V=128/V=256`、`state_v_first` 两种布局、raw/safe gate、

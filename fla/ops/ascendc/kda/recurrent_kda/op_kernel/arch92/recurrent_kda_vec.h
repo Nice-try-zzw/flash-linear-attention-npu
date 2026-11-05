@@ -14,7 +14,7 @@ __aicore__ inline void Stage1LaunchRecurrentKdaVF(RKDAVectorContext<inType, outT
                                 uint32_t parameter);
 
 template <class Gate, class Beta, bool vFirst, bool fused, bool twoPass,
-          typename inType, typename outType, typename stateType, bool stateVFirst>
+          typename inType, typename outType, typename stateType, bool stateVFirst, uint32_t WINDOW>
 __simd_vf__ inline void RecurrentKdaTokenVF(
     __ubuf__ uint8_t *memory, __ubuf__ inType *capturedQuery, __ubuf__ inType *capturedKey,
     __ubuf__ inType *capturedValue, __ubuf__ Gate *capturedGate, __ubuf__ Beta *capturedBeta,
@@ -62,7 +62,9 @@ __simd_vf__ inline void RecurrentKdaTokenVF(
         RegBase::Broadcast(a, params, mask);
         Exp(a, a, mask);
     }
-    const uint32_t inputToken = base % RKDA_A6_WINDOW_TOKENS;
+    // 窗口 X 随 State 布局取 32 或 16（见 RKDAVectorContext::x_），编译期常量，
+    // 保证 base % X 仍被折叠成位运算。
+    const uint32_t inputToken = base % WINDOW;
     auto source = (__ubuf__ stateType *)(memory + cur * BANK);
     auto destination = (__ubuf__ stateType *)(memory + next * BANK);
     RegBase::Load(q0, query + inputToken * RKDA_DIM_128, mask);
@@ -198,7 +200,9 @@ __aicore__ inline void Stage1LaunchRecurrentKdaVF(RKDAVectorContext<inType, outT
     const uint32_t launch = ctx.initialBank_ | (ctx.vfFlags_ << 8);
     const float scale = ctx.td_->scale, lower = ctx.td_->lowerBound;
     RecurrentKdaTokenVF<Gate, Beta, vFirst, fused, twoPass,
-        inType, outType, stateType, stateVFirst>(memory, capturedQuery, capturedKey, capturedValue,
+        inType, outType, stateType, stateVFirst,
+        RKDAVectorContext<inType, outType, stateType, stateVFirst, fusedMode>::x_>(
+        memory, capturedQuery, capturedKey, capturedValue,
         capturedGate, capturedBeta, capturedOutput, capturedParams, capturedEvents, base, launch, scale, lower);
 
 }

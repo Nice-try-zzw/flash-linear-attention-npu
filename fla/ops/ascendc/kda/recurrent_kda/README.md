@@ -83,7 +83,7 @@ o_t = S @ (q_t * scale)
 - `A_log/dt_bias` 支持 `FP32`。
 - `cu_seqlens` 为必传、与 q 同设备的 INT32/INT64 Tensor；offset 必须单调不减，末项不得超过输入
   token capacity。A2/A3 支持超过 8 token 的 dense 单序列与 varlen 分段，内部按 8-token 窗口递推；
-  A5/A6 的 V=128 路径同样支持长序列（A5 按 8-token、A6 按 16-token 窗口递推），V=256 每段长度仍必须小于等于 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
+  A5/A6 的 V=128 路径同样支持长序列（A5 按 8-token、A6 按 32-token（FP32 K-first 16）窗口递推），V=256 每段长度仍必须小于等于 8。末项小于 capacity 时，仅有效 token 对应的输出和 state
   更新有定义，padding tail 输出不作保证。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
 - 支持 V-first `[state_capacity,HV,V,K]` 和 K-first `[state_capacity,HV,K,V]`，state dtype 为
@@ -97,6 +97,6 @@ V=128 的 A5/A6 路径使用静态 UB 布局（不经过 TPipe/TQue）：State �
 （A5 三个 bank、A6 四个 bank），仅在当前任务最后一个 token 确定源/目标 bank 后，才用剩余 bank
 预取下一任务初态；覆盖前由 MTE2 的 Mutex 等待旧 VF/MTE3 访问完成。输入、参数和 out 使用双槽，
 整 tile out 批量搬出；CU/indices/accepted 在每次设备执行时读取，不增加 host 快照或同步。
-窗口固定（A5 `X=8`、A6 `X=16`），只处理实际有效 token 和尾块；V=256 走的兼容路径每段仍 <=8。
+窗口固定（A5 `X=8`、A6 `X=32`（FP32 K-first `X=16`）），只处理实际有效 token 和尾块；V=256 走的兼容路径每段仍 <=8。
 Q/K 的 L2 normalize 统一使用 `x/sqrt(sum(x*x)+1e-6)`。kernel 通过 `KERNEL_MODE` tiling key
 选择 `COMPAT / V_FIRST / K_FIRST / V_FIRST_FUSED` 四个实例，详见 [设计文档](docs/design.md)。

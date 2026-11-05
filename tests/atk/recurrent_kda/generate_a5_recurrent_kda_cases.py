@@ -2,14 +2,14 @@
 """生成 ascend960dt（A6）场景下的 recurrent_kda ATK 用例。
 
 A6 约束与覆盖目标（见 docs/design_960dt.md）：
-  - K 只能 128；V=128 走静态 UB 路径，**不限每段长度**，kernel 按 16-token 窗口递推。
+  - K 只能 128；V=128 走静态 UB 路径，**不限每段长度**，kernel 按 32-token（FP32 K-first 16）窗口递推。
   - V=256 走兼容路径，每段长度必须 <= 8。
   - HV 必须能被 H 整除；H/HV <= 256。
   - 存储模式由 cu_seqlens 是否存在决定：有 -> rank3 packed（layout=TND），无 -> rank4（layout=BSND）。
 
 与旧版只做 "小维度 × 多 seed" 不同，本脚本按场景矩阵生成：
   - B（段数）覆盖 1/2/3/4/7/8/16/32/64；
-  - S（每段长度）覆盖 16-token 窗口边界（15/16/17/31/32/33/…）与长序列（最大 1024）；
+  - S（每段长度）覆盖 32/16-token 窗口边界（15/16/17、31/32/33…）与长序列（最大 1024）；
   - cu_seqlens 覆盖 dense（不传）、均匀分段、ragged（含 0 长度段）、capacity > 有效 token（padding）、
     单段长序列、大量超短段；
   - 另覆盖 state 布局/dtype、gate/beta 组合、packed/speculative slot 索引、QKV view / 非连续 state、
@@ -31,11 +31,11 @@ K = 128
 ROUTE = "ascendc"
 API_TYPE = "executor_recurrent_kda"
 
-# V=256 兼容路径的每段上限；V=128 静态路径不设上限（A6 X=16 / A5 X=8）。
+# V=256 兼容路径的每段上限；V=128 静态路径不设上限（A6 X=32（FP32 K-first 16）/ A5 X=8）。
 V256_MAX_SEG = 8
 MAX_CAPACITY = 8192  # 单个用例的 packed token 上限，避免生成过大的输入
 
-# S：每段长度。含 16-token 窗口的 ±1 边界、8-token 边界与常见长序列档位。
+# S：每段长度。含 32/16-token 窗口的 ±1 边界、8-token 边界与常见长序列档位。
 S_EDGES = [1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33,
            63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024]
 # B：段数。长序列只搭配小段数，短序列才用大段数。

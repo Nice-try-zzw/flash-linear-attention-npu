@@ -20,10 +20,13 @@
 namespace RecurrentKda {
 
 // 静态 UB 路径按架构固定参数：A5(DAV_3510) 用 248KB 可用 UB、8 token 窗口、3 个 State bank；
-// A6(ascend960dt, DAV_9201) 用 384KB、16 token 窗口、4 个 State bank。
+// A6(ascend960dt, DAV_9201) 用 384KB，窗口与 bank 数按 State 布局分别取：
+//   - BF16 / FP32 V-first：4 bank（每 bank 64KiB）+ 窗口 32，UB 用到 93%；
+//   - FP32 K-first：bank 带 32B 行间距（128x136，每 bank 多 4KiB），窗口收到 16，避免顶到 UB 上限。
 constexpr uint32_t RKDA_A5_WINDOW_TOKENS = 8;
 constexpr uint32_t RKDA_A5_BANK_COUNT = 3;
-constexpr uint32_t RKDA_A6_WINDOW_TOKENS = 16;
+constexpr uint32_t RKDA_A6_WINDOW_TOKENS = 32;
+constexpr uint32_t RKDA_A6_WINDOW_TOKENS_KFIRST_FP32 = 16;
 constexpr uint32_t RKDA_A6_BANK_COUNT = 4;
 
 // A6 静态 VF 配置，由 host tiling 一次算好；bank/槽的运行时归属仍只由 kernel 决定。

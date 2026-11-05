@@ -11,9 +11,9 @@ Stage | 生产者/消费者 | 同步
   2   | MTE3 搬出整tile out和State   | out槽或State快照Mutex
 
 UB：4个State bank，按 A→B→C→D→A 轮换递推，末token期间向未参与的bank预取下一初态；
-固定 X=16（RKDA_A6_WINDOW_TOKENS），输入/out 双槽与 A5 同构，guard 尾部保留 512B 数值 scratch。
-多出来的第 4 个 bank 让逐 token 落盘（ssm_state_indices）时能多留一份快照在飞，
-避免 3 bank 时“旧快照未回写就覆盖同一 bank”的额外等待。
+窗口 X 按 State 布局取 32（BF16 / FP32 V-first）或 16（FP32 K-first），输入/out 双槽与 A5 同构，
+guard 尾部保留 512B 数值 scratch。多出来的第 4 个 bank 让逐 token 落盘（ssm_state_indices）时能多留一份
+快照在飞，避免 3 bank 时“旧快照未回写就覆盖同一 bank”的额外等待。
 
 资源 | Mutex份数 | 生命周期与反向依赖
 State访问 | 4 | MTE2初始化、VF源/目标；保护旧VF读完后才覆盖

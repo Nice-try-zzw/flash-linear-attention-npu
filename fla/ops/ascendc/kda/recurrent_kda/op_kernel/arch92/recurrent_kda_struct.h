@@ -58,8 +58,10 @@ struct RKDAVectorContext {
     GlobalTensor<stateType> stateIn_, stateOut_;
     GlobalTensor<outType> out_;
     GlobalTensor<float> aLog_, bias_;
-    // Fixed A6 V=128 layout: no per-launch window or offset reconstruction.
-    static constexpr uint32_t x_ = RKDA_A6_WINDOW_TOKENS;
+    // A6 窗口按 State 布局选择：K-first FP32 的 bank 有 32B 行间距（128x136，多 4KiB/bank），
+    // 4 bank 下用 16 才能给输入/out 槽留出余量；其余布局用 32，把 384KB 用到约 93%。
+    static constexpr uint32_t x_ = (!stateVFirst && std::is_same<stateType, float>::value) ?
+        RKDA_A6_WINDOW_TOKENS_KFIRST_FP32 : RKDA_A6_WINDOW_TOKENS;
     static constexpr uint32_t betaSlot_ = 32 * x_;
     static constexpr uint32_t qOffset_ = RKDA_A6_BANK_COUNT * RegBase::StateLayout<stateType, stateVFirst>::BYTES;
     static constexpr uint32_t kOffset_ = qOffset_ + RKDA_ROW_FP32_BYTES_512 * x_;
