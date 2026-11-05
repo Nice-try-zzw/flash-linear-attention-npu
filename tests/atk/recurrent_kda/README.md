@@ -51,6 +51,10 @@ state 存储口径，实际平台由 `-soc` 指定。
 `python tests/atk/recurrent_kda/generate_a5_recurrent_kda_cases.py --soc ascend960dt`
 按结构矩阵重建 A6 场景包（默认输出 `atk_recurrent_kda_a6.json`，`--soc ascend950` 可生成 A5 版本）。
 
+> `atk_recurrent_kda_a6.json` 必须用 `executor_recurrent_kda.py` 执行（`run_test_cpu.sh` 默认即是该执行器）。
+> `executor_recurrent_kda_a5.py` 只支持旧版简单 spec（均匀分段、无 `lengths/padding/indices`、无
+> raw gate/A_log、无 QKV view），用它跑 A6 包会生成与原 spec 不一致的输入。
+
 ## 默认用例
 
 - BF16 用例：`{"dtype": "bf16", "B": 2, "T": 2, "H": 2, "HV": 4, "K": 128, "V": 128, "layout": "BSND", "state_v_first": true, "op": "recurrent_kda", "case_id": 0, "seed": 20260817, "route": "ascendc", "soc": "ascend910b"}`

@@ -141,7 +141,8 @@ def iter_specs():
     ]):
         yield dict(name=f"state_vf{int(vf)}_{sd}_ip{int(inplace)}_none{int(initial_none)}",
                    T=17, B=2, H=2, HV=4, V=128, layout="TND", cu=True,
-                   state_v_first=vf, state_dtype=sd, inplace=inplace, initial_none=initial_none,
+                   state_v_first=vf, state_dtype=sd,
+                   inplace=(inplace and not initial_none), initial_none=initial_none,
                    strided_state=(i % 2 == 0))
 
     # 9) gate / beta 组合：raw+safe+sigmoid+negative、dtype 三分支

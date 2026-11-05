@@ -311,8 +311,12 @@ def run_cpu(spec: dict[str, Any], high_precision: bool = False):
     inputs = build_inputs(spec, torch.device("cpu"), high_precision)
     storage_dtype = (torch.bfloat16 if spec.get("soc", "ascend950") == "ascend950"
                      and spec.get("state_dtype", "fp32") == "bf16" and not spec.get("initial_none") else None)
-    return _visible_outputs(recurrent_kda_reference(**inputs, **call_options(spec),
-                                                   state_storage_dtype=storage_dtype), spec)
+    out, state = _visible_outputs(recurrent_kda_reference(**inputs, **call_options(spec),
+                                                          state_storage_dtype=storage_dtype), spec)
+    # 与算子公开 dtype 对齐：out 固定 BF16，state 跟随 state_dtype（FP32/BF16）。
+    # 高精度只在内部计算里生效，返回的 golden 必须和 DUT 同 dtype，否则 ATK 会拒绝比较。
+    state_out_dtype = torch.float32 if spec.get("state_dtype", "fp32") == "fp32" else torch.bfloat16
+    return out.to(torch.bfloat16), state.to(state_out_dtype)
 
 
 def run_npu(spec: dict[str, Any], input_data: InputDataset, inputs=None):
@@ -334,7 +338,13 @@ class FunctionApi(BaseApi):
 
     def __init__(self, task_result: TaskResult):
         super(FunctionApi, self).__init__(task_result)
-        self.high_precision = self.device == "cpu"
+        # golden 节点（is_benchmark_task=False）在 fp64 上计算；基准节点用原始精度。
+        # 无论哪种节点，run_cpu 都会把输出 cast 回算子 dtype，保证与 NPU 输出可比。
+        is_benchmark = getattr(task_result, "is_benchmark_task", None)
+        if self.device == "cpu":
+            self.high_precision = True if is_benchmark is None else not bool(is_benchmark)
+        else:
+            self.high_precision = False
         self._performance_inputs = None
 
     def __call__(self, input_data: InputDataset, with_output: bool = False):

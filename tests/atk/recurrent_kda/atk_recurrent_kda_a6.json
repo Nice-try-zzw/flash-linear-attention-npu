@@ -19,13 +19,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -250,13 +250,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -481,13 +481,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -712,13 +712,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -943,13 +943,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -1174,13 +1174,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -1405,13 +1405,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -1636,13 +1636,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -1867,13 +1867,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -2098,13 +2098,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -2329,13 +2329,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -2560,13 +2560,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -2791,13 +2791,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -3022,13 +3022,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -3253,13 +3253,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -3484,13 +3484,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -3715,13 +3715,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -3946,13 +3946,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -4177,13 +4177,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -4408,13 +4408,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -4639,13 +4639,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -4870,13 +4870,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -5101,13 +5101,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -5332,13 +5332,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -5563,13 +5563,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -5794,13 +5794,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -6025,13 +6025,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -6256,13 +6256,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -6487,13 +6487,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -6718,13 +6718,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -6949,13 +6949,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -7180,13 +7180,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -7411,13 +7411,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -7642,13 +7642,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -7873,13 +7873,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -8104,13 +8104,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -8335,13 +8335,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -8566,13 +8566,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -8797,13 +8797,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -9028,13 +9028,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -9259,13 +9259,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -9490,13 +9490,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -9721,13 +9721,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -9952,13 +9952,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -10183,13 +10183,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -10414,13 +10414,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -10645,13 +10645,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -10876,13 +10876,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -11107,13 +11107,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -11338,13 +11338,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -11569,13 +11569,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -11800,13 +11800,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -12031,13 +12031,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -12262,13 +12262,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -12493,13 +12493,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -12724,13 +12724,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -12955,13 +12955,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -13186,13 +13186,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -13417,13 +13417,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -13648,13 +13648,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -13879,13 +13879,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -14110,13 +14110,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -14341,13 +14341,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -14572,13 +14572,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -14803,13 +14803,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -15034,13 +15034,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -15265,13 +15265,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -15496,13 +15496,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -15727,13 +15727,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -15958,13 +15958,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -16189,13 +16189,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -16420,13 +16420,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -16651,13 +16651,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -16882,13 +16882,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -17113,13 +17113,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -17344,13 +17344,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -17575,13 +17575,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -17806,13 +17806,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -18037,13 +18037,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -18268,13 +18268,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -18499,13 +18499,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -18730,13 +18730,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -18961,13 +18961,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -19192,13 +19192,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -19423,13 +19423,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -19654,13 +19654,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -19885,13 +19885,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -20116,13 +20116,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -20347,13 +20347,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -20578,13 +20578,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -20809,13 +20809,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -21040,13 +21040,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -21271,13 +21271,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -21502,13 +21502,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -21552,7 +21552,7 @@
                 "required": true,
                 "dtype": "string",
                 "shape": null,
-                "range_values": "{\"T\": 17, \"B\": 2, \"H\": 2, \"HV\": 4, \"V\": 128, \"layout\": \"TND\", \"cu\": true, \"state_v_first\": true, \"state_dtype\": \"fp32\", \"inplace\": true, \"initial_none\": true, \"strided_state\": true, \"K\": 128, \"dtype\": \"bf16\", \"op\": \"recurrent_kda\", \"route\": \"ascendc\", \"soc\": \"ascend960dt\", \"seed\": 20260817, \"case_id\": 93, \"name\": \"state_vf1_fp32_ip1_none1\"}",
+                "range_values": "{\"T\": 17, \"B\": 2, \"H\": 2, \"HV\": 4, \"V\": 128, \"layout\": \"TND\", \"cu\": true, \"state_v_first\": true, \"state_dtype\": \"fp32\", \"inplace\": false, \"initial_none\": true, \"strided_state\": true, \"K\": 128, \"dtype\": \"bf16\", \"op\": \"recurrent_kda\", \"route\": \"ascendc\", \"soc\": \"ascend960dt\", \"seed\": 20260817, \"case_id\": 93, \"name\": \"state_vf1_fp32_ip1_none1\"}",
                 "backward": false,
                 "align_32B": null,
                 "outlier_values": null
@@ -21733,13 +21733,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -21783,7 +21783,7 @@
                 "required": true,
                 "dtype": "string",
                 "shape": null,
-                "range_values": "{\"T\": 17, \"B\": 2, \"H\": 2, \"HV\": 4, \"V\": 128, \"layout\": \"TND\", \"cu\": true, \"state_v_first\": false, \"state_dtype\": \"bf16\", \"inplace\": true, \"initial_none\": true, \"strided_state\": false, \"K\": 128, \"dtype\": \"bf16\", \"op\": \"recurrent_kda\", \"route\": \"ascendc\", \"soc\": \"ascend960dt\", \"seed\": 20260817, \"case_id\": 94, \"name\": \"state_vf0_bf16_ip1_none1\"}",
+                "range_values": "{\"T\": 17, \"B\": 2, \"H\": 2, \"HV\": 4, \"V\": 128, \"layout\": \"TND\", \"cu\": true, \"state_v_first\": false, \"state_dtype\": \"bf16\", \"inplace\": false, \"initial_none\": true, \"strided_state\": false, \"K\": 128, \"dtype\": \"bf16\", \"op\": \"recurrent_kda\", \"route\": \"ascendc\", \"soc\": \"ascend960dt\", \"seed\": 20260817, \"case_id\": 94, \"name\": \"state_vf0_bf16_ip1_none1\"}",
                 "backward": false,
                 "align_32B": null,
                 "outlier_values": null
@@ -21964,13 +21964,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -22195,13 +22195,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -22426,13 +22426,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -22657,13 +22657,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -22888,13 +22888,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -23119,13 +23119,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -23350,13 +23350,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -23581,13 +23581,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -23812,13 +23812,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -24043,13 +24043,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -24274,13 +24274,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -24505,13 +24505,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -24736,13 +24736,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -24967,13 +24967,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -25198,13 +25198,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -25429,13 +25429,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -25660,13 +25660,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -25891,13 +25891,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -26122,13 +26122,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -26353,13 +26353,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -26584,13 +26584,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -26815,13 +26815,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -27046,13 +27046,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -27277,13 +27277,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -27508,13 +27508,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -27739,13 +27739,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -27970,13 +27970,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -28201,13 +28201,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -28432,13 +28432,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -28663,13 +28663,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -28894,13 +28894,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -29125,13 +29125,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -29356,13 +29356,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -29587,13 +29587,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },
@@ -29818,13 +29818,13 @@
         "backward": false,
         "standard": {
             "acc": {
-                "cv_fused_double_benchmark": {
-                    "max_re_ratio": 5,
-                    "avg_re_ratio": 1.5,
-                    "root_mean_squared_ratio": 1.5,
-                    "number_count_radio": 4
-                }
-            },
+        "cv_fused_double_benchmark": {
+          "max_re_ratio": 5,
+          "avg_re_ratio": 1.5,
+          "root_mean_squared_ratio": 1.5,
+          "number_count_radio": 4
+        }
+      },
             "perf": "not_key",
             "mem": 1.1
         },

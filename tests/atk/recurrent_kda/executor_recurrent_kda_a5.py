@@ -1,4 +1,8 @@
-"""recurrent_kda 的 ATK executor。
+"""recurrent_kda 的 ATK executor（历史 A5 简化版）。
+
+只支持旧的简单 spec：固定 `[B,T]`/`[B*T]` 均匀分段、无 `lengths/padding/indices`、
+g 固定为 step log gate（无 A_log/dt_bias）、无 `qkv_view/strided_state`。
+`atk_recurrent_kda_a6.json` 等结构矩阵包请使用 `executor_recurrent_kda.py` 执行。
 
 输入生成、CPU 标杆、run_cpu、run_npu 和 FunctionApi 都放在本算子目录中。
 """
@@ -60,10 +64,12 @@ def build_inputs(spec, device, high_precision=False):
         "beta": _rand((*shape_bt, HV), "fp32",
                       torch.float64 if high_precision else torch.float32,
                       cpu, seed + 5, 0.1, 0.9),
-        # state pool 与 layout 无关，仍按 [seq_num, HV, V, K]
-        "initial_state": _zeros((B, HV, V, K), "fp32",
-                                torch.float64 if high_precision else torch.float32,
-                                cpu),
+        # state pool：V-first [seq_num,HV,V,K] / K-first [seq_num,HV,K,V]，必须跟随 state_v_first
+        "initial_state": _zeros(
+            (B, HV) + ((V, K) if bool(spec.get("state_v_first", True)) else (K, V)),
+            "fp32",
+            torch.float64 if high_precision else torch.float32,
+            cpu),
         "cu_seqlens": _int_tensor([i * T for i in range(B + 1)], cpu, torch.int64),
         "scale": float(spec.get("scale", 1.0 / math.sqrt(K))),
         "layout": layout,

@@ -21,7 +21,7 @@ nodes:
   # 612  /root/miniconda3/envs/zzw311/bin/python -m pip install --force-reinstall --no-cache-dir --no-deps /home/z00981887/A6-sim/flash-linear-attention-npu/dist/flash_linear_attention_npu_a5-26.10.0+a6.dev.perf.try.dev19368a1-py3-none-manylinux_2_34_aarch64.whl
   # 614  atk task     -c atk_recurrent_kda_a5.json     -n nodes_recurrent_kda.yaml     -p executor_recurrent_kda_a5.py     -sp     --task accuracy -s 2 -e 4
   # 615  atk task     -c atk_recurrent_kda_a5.json     -n nodes_recurrent_kda.yaml     -p executor_recurrent_kda_a5.py     -sp     --task accuracy
-  # A6（ascend960dt）场景包：
+  # A6（ascend960dt）场景包（必须用 executor_recurrent_kda.py，a5 executor 不支持结构矩阵 spec）：
   # 700  python generate_a5_recurrent_kda_cases.py     --soc ascend960dt     --output atk_recurrent_kda_a6.json
   # 701  atk task     -c atk_recurrent_kda_a6.json     -n nodes_recurrent_kda.yaml     -p executor_recurrent_kda.py     -sp     --task accuracy
   # 702  atk task     -c atk_recurrent_kda_a6.json     -n nodes_recurrent_kda.yaml     -p executor_recurrent_kda.py     -sp     --task accuracy -wl "[0]"
