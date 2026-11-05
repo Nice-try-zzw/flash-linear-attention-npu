@@ -682,6 +682,23 @@ private:
         return 1.0f / denom;
     }
 
+    // 扁平 FP32 向量 -> 输出 dtype（out 一个 V 切片是扁平向量，不是二维行块）。
+    template <typename dstType>
+    __simd_vf__ inline void PackFlatVF(__ubuf__ dstType *dst, __ubuf__ float *src, uint32_t count)
+    {
+        MaskReg full = CreateMask<float, MaskPattern::ALL>();
+        for (uint32_t i = 0; i < count; i += V_LENGTH) {
+            uint32_t remain = count - i;
+            MaskReg mask = full;
+            if (remain < static_cast<uint32_t>(V_LENGTH)) {
+                mask = UpdateMask<float>(remain);
+            }
+            RegTensor<float> reg;
+            RegBase::Load(reg, src + i, mask);
+            RegBase::Store(dst + i, reg, mask);
+        }
+    }
+
     // 标量参数读取/计算也不再走 membase：单 lane 的 copy/exp 在寄存器内完成。
     __simd_vf__ inline void ScalarCopyVF(__ubuf__ float *dst, __ubuf__ float *src)
     {
@@ -1169,8 +1186,8 @@ private:
             }
             stateOutQueue_.EnQue<stateType>(stateOutLocal);
         }
-        PackRowsVF<outType, 128>(reinterpret_cast<__ubuf__ outType *>(attnOutLocal.GetPhyAddr()),
-                                 reinterpret_cast<__ubuf__ float *>(attnInUb.GetPhyAddr()), curSingleV);
+        PackFlatVF<outType>(reinterpret_cast<__ubuf__ outType *>(attnOutLocal.GetPhyAddr()),
+                            reinterpret_cast<__ubuf__ float *>(attnInUb.GetPhyAddr()), curSingleV);
         attnOutQueue_.EnQue<outType>(attnOutLocal);
     }
 

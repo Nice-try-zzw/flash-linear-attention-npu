@@ -309,9 +309,13 @@ def _visible_outputs(outputs, spec):
 def run_cpu(spec: dict[str, Any], high_precision: bool = False):
     torch.set_num_threads(1)
     inputs = build_inputs(spec, torch.device("cpu"), high_precision)
-    # A5/A6 的静态 UB 路径都按 State dtype 存 bank：bf16 state 每个 token 都会做 bf16 舍入，
-    # 因此 golden 必须模拟同样的存储 dtype（与具体 soc 无关）。
-    storage_dtype = (torch.bfloat16 if spec.get("state_dtype", "fp32") == "bf16"
+    # 只有 A5/A6 的 V=128 静态 UB 路径把 State 以 bf16 存 bank（每 token 舍入一次）。
+    # V=256 走 legacy/compat：State 在 UB 内始终是 FP32，只在最终写回时 cast，
+    # 因此这种情况下 golden 不能做逐 token bf16 存储模拟，否则会比算子多舍入 S 次。
+    static_bf16_bank = (spec.get("V") == 128
+                        and spec.get("soc") in ("ascend950", "ascend960dt"))
+    storage_dtype = (torch.bfloat16 if static_bf16_bank
+                     and spec.get("state_dtype", "fp32") == "bf16"
                      and not spec.get("initial_none") else None)
     out, state = _visible_outputs(recurrent_kda_reference(**inputs, **call_options(spec),
                                                           state_storage_dtype=storage_dtype), spec)
