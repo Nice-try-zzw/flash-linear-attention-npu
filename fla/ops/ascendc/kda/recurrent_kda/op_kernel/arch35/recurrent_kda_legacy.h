@@ -18,6 +18,7 @@
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include "../recurrent_kda_tiling_data.h"
+#include "recurrent_kda_regbase.h"
 
 namespace RecurrentKda {
 
@@ -377,12 +378,8 @@ public:
         buffOffset += kSize;
         stateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
         buffOffset += cubeSize;
-        if (alignK_ == TWO_V_LENGTH) {
-            broadTmpInUb = stateInUb;
-        } else {
-            broadTmpInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
-            buffOffset += cubeSize;
-        }
+        // K 恒为 128（aclnn 已拦截），broadTmp 直接复用 state 工作区。
+        broadTmpInUb = stateInUb;
         betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
         buffOffset += betaUbSize;
         gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
@@ -663,8 +660,8 @@ private:
         DataCopyPadParams padParams{false, 0, 0, 0};
         DataCopyPad(scalar, tensor[offset], params, padParams);
         SyncMte2ToV();
-        Adds(scalar, scalar, 0.0f, 1);
-        PipeBarrier<PIPE_V>();
+        ScalarCopyVF(reinterpret_cast<__ubuf__ float *>(scalar.GetPhyAddr()),
+                     reinterpret_cast<__ubuf__ float *>(scalar.GetPhyAddr()));
         SyncVToS();
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
         return ptr[0];
@@ -673,10 +670,7 @@ private:
     __aicore__ inline float ExpScalar(float x)
     {
         LocalTensor<float> scalar = scalarBuf_.Get<float>();
-        Duplicate(scalar, x, 1);
-        PipeBarrier<PIPE_V>();
-        Exp(scalar, scalar, 1);
-        PipeBarrier<PIPE_V>();
+        ScalarExpVF(reinterpret_cast<__ubuf__ float *>(scalar.GetPhyAddr()), x);
         SyncVToS();
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
         return ptr[0];
@@ -688,73 +682,161 @@ private:
         return 1.0f / denom;
     }
 
-    __aicore__ inline void NormalizeRows(LocalTensor<float> &tensor, int32_t seqLen)
+    // 标量参数读取/计算也不再走 membase：单 lane 的 copy/exp 在寄存器内完成。
+    __simd_vf__ inline void ScalarCopyVF(__ubuf__ float *dst, __ubuf__ float *src)
     {
-        for (int32_t row = 0; row < seqLen; ++row) {
-            uint32_t rowOffset = static_cast<uint32_t>(row) * alignK_;
-            Mul(broadTmpInUb, tensor[rowOffset], tensor[rowOffset], alignK_);
-            PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(deltaInUb, broadTmpInUb, 1);
-            PipeBarrier<PIPE_V>();
-            Adds(deltaInUb, deltaInUb, 1e-6f, 1);
-            PipeBarrier<PIPE_V>();
-            Sqrt(deltaInUb, deltaInUb, 1);
-            PipeBarrier<PIPE_V>();
-            SyncVToS();
-            float norm = deltaInUb.GetValue(0);
-            if (norm > 0.0f) {
-                Muls(tensor[rowOffset], tensor[rowOffset], 1.0f / norm, alignK_);
-                PipeBarrier<PIPE_V>();
+        uint32_t one = 1;
+        MaskReg mask = UpdateMask<float>(one);
+        RegTensor<float> reg;
+        RegBase::Load(reg, src, mask);
+        RegBase::Store(dst, reg, mask);
+    }
+
+    __simd_vf__ inline void ScalarExpVF(__ubuf__ float *dst, float x)
+    {
+        uint32_t one = 1;
+        MaskReg mask = UpdateMask<float>(one);
+        RegTensor<float> reg;
+        Duplicate(reg, x);
+        Exp(reg, reg, mask);
+        RegBase::Store(dst, reg, mask);
+    }
+
+    // 扁平小向量（beta）也同样走寄存器内转换。
+    template <typename srcType>
+    __simd_vf__ inline void UnpackFlatVF(__ubuf__ float *dst, __ubuf__ srcType *src, uint32_t count)
+    {
+        MaskReg full = CreateMask<float, MaskPattern::ALL>();
+        for (uint32_t i = 0; i < count; i += V_LENGTH) {
+            uint32_t remain = count - i;
+            MaskReg mask = full;
+            if (remain < static_cast<uint32_t>(V_LENGTH)) {
+                mask = UpdateMask<float>(remain);
             }
+            RegTensor<float> reg;
+            RegBase::Load(reg, src + i, mask);
+            RegBase::Store(dst + i, reg, mask);
+        }
+    }
+
+    // 低精度 -> FP32：寄存器内 unpack/cast，避免整块 membase Cast。
+    template <typename srcType, uint32_t COLS>
+    __simd_vf__ inline void UnpackRowsVF(__ubuf__ float *dst, __ubuf__ srcType *src, uint32_t rows)
+    {
+        MaskReg mask = CreateMask<float, MaskPattern::ALL>();
+        constexpr uint32_t SEGS = COLS / static_cast<uint32_t>(V_LENGTH);
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t base = row * COLS;
+            for (uint32_t seg = 0; seg < SEGS; ++seg) {
+                RegTensor<float> reg;
+                RegBase::Load(reg, src + base + seg * V_LENGTH, mask);
+                RegBase::Store(dst + base + seg * V_LENGTH, reg, mask);
+            }
+        }
+    }
+
+    // FP32 -> 输出/State dtype：寄存器内 cast + pack。
+    template <typename dstType, uint32_t COLS>
+    __simd_vf__ inline void PackRowsVF(__ubuf__ dstType *dst, __ubuf__ float *src, uint32_t rows)
+    {
+        MaskReg mask = CreateMask<float, MaskPattern::ALL>();
+        constexpr uint32_t SEGS = COLS / static_cast<uint32_t>(V_LENGTH);
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t base = row * COLS;
+            for (uint32_t seg = 0; seg < SEGS; ++seg) {
+                RegTensor<float> reg;
+                RegBase::Load(reg, src + base + seg * V_LENGTH, mask);
+                RegBase::Store(dst + base + seg * V_LENGTH, reg, mask);
+            }
+        }
+    }
+
+    // K 恒为 128：整块 q/k 的 L2 norm 与 q 的 scale 都在寄存器内完成，
+    // 取代原来逐行 ReduceSum→GetValue→Muls（每行两次 V→S 同步）。
+    __simd_vf__ inline void NormScaleVF(__ubuf__ float *q, __ubuf__ float *k, uint32_t rows,
+                                       float scale, bool normalize)
+    {
+        MaskReg mask = CreateMask<float, MaskPattern::ALL>();
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t base = row * TWO_V_LENGTH;
+            RegTensor<float> lo, hi;
+            RegBase::Load(lo, q + base, mask);
+            RegBase::Load(hi, q + base + V_LENGTH, mask);
+            if (normalize) {
+                RegBase::Normalize(lo, hi, mask);
+            }
+            Muls(lo, lo, scale, mask);
+            Muls(hi, hi, scale, mask);
+            RegBase::Store(q + base, lo, mask);
+            RegBase::Store(q + base + V_LENGTH, hi, mask);
+            RegBase::Load(lo, k + base, mask);
+            RegBase::Load(hi, k + base + V_LENGTH, mask);
+            if (normalize) {
+                RegBase::Normalize(lo, hi, mask);
+            }
+            RegBase::Store(k + base, lo, mask);
+            RegBase::Store(k + base + V_LENGTH, hi, mask);
+        }
+    }
+
+    // raw gate（A_log/dt_bias/safe_gate）同样在寄存器内完成，逐行处理 tile。
+    __simd_vf__ inline void GateTransformVF(__ubuf__ float *g, __ubuf__ float *bias, uint32_t rows,
+                                           float expA, float lower, bool safe, bool hasBias)
+    {
+        MaskReg mask = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<float> biasLo, biasHi;
+        if (hasBias) {
+            RegBase::Load(biasLo, bias, mask);
+            RegBase::Load(biasHi, bias + V_LENGTH, mask);
+        }
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t base = row * TWO_V_LENGTH;
+            RegTensor<float> lo, hi;
+            RegBase::Load(lo, g + base, mask);
+            RegBase::Load(hi, g + base + V_LENGTH, mask);
+            if (hasBias) {
+                Add(lo, lo, biasLo, mask);
+                Add(hi, hi, biasHi, mask);
+            }
+            if (safe) {
+                Muls(lo, lo, expA, mask);
+                Muls(hi, hi, expA, mask);
+                RegBase::Sigmoid(lo, mask);
+                RegBase::Sigmoid(hi, mask);
+                Muls(lo, lo, lower, mask);
+                Muls(hi, hi, lower, mask);
+            } else {
+                Exp(lo, lo, mask);
+                Exp(hi, hi, mask);
+                Adds(lo, lo, 1.0f, mask);
+                Adds(hi, hi, 1.0f, mask);
+                Ln(lo, lo, mask);
+                Ln(hi, hi, mask);
+                Muls(lo, lo, -expA, mask);
+                Muls(hi, hi, -expA, mask);
+            }
+            RegBase::Store(g + base, lo, mask);
+            RegBase::Store(g + base + V_LENGTH, hi, mask);
         }
     }
 
     __aicore__ inline void ApplyGateInKernel(uint64_t head, int32_t seqLen)
     {
-        uint32_t total = static_cast<uint32_t>(seqLen) * alignK_;
         float expA = hasALog_ ? ExpScalar(ReadFloat(aLogGm_, head)) : 1.0f;
-
         if (hasDtBias_) {
             CopyVectorIn(broadTmpInUb, dtBiasGm_, head * realK_, realK_);
             SyncMte2ToV();
-            for (int32_t row = 0; row < seqLen; ++row) {
-                Add(gateInUb[row * alignK_], gateInUb[row * alignK_], broadTmpInUb, alignK_);
-                PipeBarrier<PIPE_V>();
-            }
         }
-
-        if (safeGate_) {
-            Muls(gateInUb, gateInUb, expA, total);
-            PipeBarrier<PIPE_V>();
-            Muls(broadTmpInUb, gateInUb, -1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Exp(broadTmpInUb, broadTmpInUb, total);
-            PipeBarrier<PIPE_V>();
-            Adds(broadTmpInUb, broadTmpInUb, 1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Duplicate(gateInUb, 1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Div(gateInUb, gateInUb, broadTmpInUb, total);
-            PipeBarrier<PIPE_V>();
-            Muls(gateInUb, gateInUb, lowerBound_, total);
-            PipeBarrier<PIPE_V>();
-        } else {
-            Exp(gateInUb, gateInUb, total);
-            PipeBarrier<PIPE_V>();
-            Adds(gateInUb, gateInUb, 1.0f, total);
-            PipeBarrier<PIPE_V>();
-            Ln(gateInUb, gateInUb, total);
-            PipeBarrier<PIPE_V>();
-            Muls(gateInUb, gateInUb, -expA, total);
-            PipeBarrier<PIPE_V>();
-        }
+        GateTransformVF(reinterpret_cast<__ubuf__ float *>(gateInUb.GetPhyAddr()),
+                        reinterpret_cast<__ubuf__ float *>(broadTmpInUb.GetPhyAddr()),
+                        static_cast<uint32_t>(seqLen), expA, lowerBound_, safeGate_, hasDtBias_);
+        PipeBarrier<PIPE_V>();
     }
 
     template <typename gateType>
     __aicore__ inline void CopyInGate(uint64_t gateOffset, int32_t seqLen)
     {
         LocalTensor<gateType> gateLocal = gateInQueue_.AllocTensor<gateType>();
-        Duplicate<gateType>(gateLocal, static_cast<gateType>(0), alignK_ * static_cast<uint32_t>(seqLen));
         SyncVToMte2();
         DataCopyExtParams gateInParams{static_cast<uint16_t>(seqLen),
                                        static_cast<uint32_t>(realK_ * sizeof(gateType)),
@@ -770,12 +852,9 @@ private:
         }
         gateInQueue_.EnQue<gateType>(gateLocal);
         gateLocal = gateInQueue_.DeQue<gateType>();
-        if constexpr (std::is_same<gateType, float32_t>()) {
-            Adds(gateInUb, gateLocal, 0.0f, alignK_ * static_cast<uint32_t>(seqLen));
-        } else {
-            Cast(gateInUb, gateLocal, AscendC::RoundMode::CAST_NONE,
-                 alignK_ * static_cast<uint32_t>(seqLen));
-        }
+        UnpackRowsVF<gateType, 128>(reinterpret_cast<__ubuf__ float *>(gateInUb.GetPhyAddr()),
+                                    reinterpret_cast<__ubuf__ gateType *>(gateLocal.GetPhyAddr()),
+                                    static_cast<uint32_t>(seqLen));
         gateInQueue_.FreeTensor(gateLocal);
         PipeBarrier<PIPE_V>();
     }
@@ -813,15 +892,19 @@ private:
         qLocal = qInQueue_.DeQue<inType>();
         kLocal = kInQueue_.DeQue<inType>();
         vLocal = vInQueue_.DeQue<inType>();
-        Cast(qInUb, qLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
-        Cast(kInUb, kLocal, AscendC::RoundMode::CAST_NONE, alignK_ * seqLen);
-        Cast(vInUb, vLocal, AscendC::RoundMode::CAST_NONE, alignV_ * seqLen);
+        UnpackRowsVF<inType, 128>(reinterpret_cast<__ubuf__ float *>(qInUb.GetPhyAddr()),
+                                  reinterpret_cast<__ubuf__ inType *>(qLocal.GetPhyAddr()),
+                                  static_cast<uint32_t>(seqLen));
+        UnpackRowsVF<inType, 128>(reinterpret_cast<__ubuf__ float *>(kInUb.GetPhyAddr()),
+                                  reinterpret_cast<__ubuf__ inType *>(kLocal.GetPhyAddr()),
+                                  static_cast<uint32_t>(seqLen));
+        UnpackRowsVF<inType, 256>(reinterpret_cast<__ubuf__ float *>(vInUb.GetPhyAddr()),
+                                  reinterpret_cast<__ubuf__ inType *>(vLocal.GetPhyAddr()),
+                                  static_cast<uint32_t>(seqLen));
         AscendC::PipeBarrier<PIPE_V>();
-        if (useQkL2norm_) {
-            NormalizeRows(qInUb, seqLen);
-            NormalizeRows(kInUb, seqLen);
-        }
-        Muls(qInUb, qInUb, scale_, seqLen * alignK_);
+        NormScaleVF(reinterpret_cast<__ubuf__ float *>(qInUb.GetPhyAddr()),
+                    reinterpret_cast<__ubuf__ float *>(kInUb.GetPhyAddr()),
+                    static_cast<uint32_t>(seqLen), scale_, useQkL2norm_);
         AscendC::PipeBarrier<PIPE_V>();
         if (useGateInKernel_) {
             ApplyGateInKernel(head, seqLen);
@@ -924,16 +1007,22 @@ private:
             if constexpr (std::is_same<stateType, float32_t>()) {
                 DataCopy(stateInUb, stateLocal, alignK_ * curSingleV);
             } else {
-                Cast(stateInUb, stateLocal, AscendC::RoundMode::CAST_NONE, alignK_ * curSingleV);
+                UnpackRowsVF<stateType, 128>(reinterpret_cast<__ubuf__ float *>(stateInUb.GetPhyAddr()),
+                                         reinterpret_cast<__ubuf__ stateType *>(stateLocal.GetPhyAddr()),
+                                         curSingleV);
             }
         } else {
             LocalTensor<stateType> stateTransposeLocal = stateTransposeBuf_.Get<stateType>();
             TransposeKFirstToVFirst(stateTransposeLocal, stateLocal, curSingleV);
             PipeBarrier<PIPE_V>();
             if constexpr (std::is_same<stateType, float32_t>()) {
-                Adds(stateInUb, stateTransposeLocal, 0.0f, alignK_ * curSingleV);
+                UnpackRowsVF<stateType, 128>(reinterpret_cast<__ubuf__ float *>(stateInUb.GetPhyAddr()),
+                                         reinterpret_cast<__ubuf__ stateType *>(stateTransposeLocal.GetPhyAddr()),
+                                         curSingleV);
             } else {
-                Cast(stateInUb, stateTransposeLocal, AscendC::RoundMode::CAST_NONE, alignK_ * curSingleV);
+                UnpackRowsVF<stateType, 128>(reinterpret_cast<__ubuf__ float *>(stateInUb.GetPhyAddr()),
+                                         reinterpret_cast<__ubuf__ stateType *>(stateTransposeLocal.GetPhyAddr()),
+                                         curSingleV);
             }
         }
         stateInQueue_.FreeTensor(stateLocal);
@@ -1053,55 +1142,35 @@ private:
     {
         __ubuf__ float* srcAddr = (__ubuf__ float*)srcTensor.GetPhyAddr();
         __ubuf__ float* dstAddr = (__ubuf__ float*)dstTensor.GetPhyAddr();
-        uint16_t rowNum = static_cast<uint16_t>(rows);
-        if (alignK_ <= V_LENGTH) {
-            ReduceSum64(dstAddr, srcAddr, rowNum);
-        } else if (alignK_ <= TWO_V_LENGTH) {
-            ReduceSum128(dstAddr, srcAddr, rowNum);
-        } else {
-            ReduceSumVF(dstAddr, srcAddr, rowNum);
-        }
+        // K 恒为 128：归约固定走 128 lane 版本。
+        ReduceSum128(dstAddr, srcAddr, static_cast<uint16_t>(rows));
     }
 
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset,
                                    uint64_t curVOffset, uint64_t betaOffset)
     {
-        if (alignK_ == TWO_V_LENGTH) {
-            DecayMatVecReduce128(stateInUb, gateInUb[curQKOffset],
-                                 kInUb[curQKOffset], deltaInUb, curSingleV);
-        } else {
-            MatVecMul(stateInUb, gateInUb[curQKOffset], stateInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            MatVecMul(stateInUb, kInUb[curQKOffset], broadTmpInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(deltaInUb, broadTmpInUb, curSingleV);
-        }
+        // K 恒为 128：decay/S@k 与 delta/outer/S@q 都走 regbase 融合 VF。
+        DecayMatVecReduce128(stateInUb, gateInUb[curQKOffset],
+                             kInUb[curQKOffset], deltaInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
-        if (alignK_ == TWO_V_LENGTH) {
-            ProcessDeltaKQReduce128Dispatch(deltaInUb, vInUb[curVOffset],
-                                    betaInUb, betaOffset, kInUb[curQKOffset], stateInUb,
-                                    qInUb[curQKOffset], attnInUb, curSingleV);
-        } else {
-            Sub(deltaInUb, vInUb[curVOffset], deltaInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            Muls(deltaInUb, deltaInUb, beta_, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            ProcessKQ(deltaInUb, kInUb[curQKOffset], stateInUb,
-                      qInUb[curQKOffset], broadTmpInUb, curSingleV);
-            AscendC::PipeBarrier<PIPE_V>();
-            ReduceSumDispatch(attnInUb, broadTmpInUb, curSingleV);
-        }
+        ProcessDeltaKQReduce128Dispatch(deltaInUb, vInUb[curVOffset],
+                                        betaInUb, betaOffset, kInUb[curQKOffset], stateInUb,
+                                        qInUb[curQKOffset], attnInUb, curSingleV);
+
         LocalTensor<outType> attnOutLocal = attnOutQueue_.AllocTensor<outType>();
         if (shouldStoreState_) {
             LocalTensor<stateType> stateOutLocal = stateOutQueue_.AllocTensor<stateType>();
             if constexpr (std::is_same<stateType, float32_t>()) {
                 DataCopy(stateOutLocal, stateInUb, alignK_ * curSingleV);
             } else {
-                Cast(stateOutLocal, stateInUb, AscendC::RoundMode::CAST_RINT, alignK_ * curSingleV);
+                PackRowsVF<stateType, 128>(reinterpret_cast<__ubuf__ stateType *>(stateOutLocal.GetPhyAddr()),
+                                           reinterpret_cast<__ubuf__ float *>(stateInUb.GetPhyAddr()),
+                                           curSingleV);
             }
             stateOutQueue_.EnQue<stateType>(stateOutLocal);
         }
-        Cast(attnOutLocal, attnInUb, AscendC::RoundMode::CAST_RINT, curSingleV);
+        PackRowsVF<outType, 128>(reinterpret_cast<__ubuf__ outType *>(attnOutLocal.GetPhyAddr()),
+                                 reinterpret_cast<__ubuf__ float *>(attnInUb.GetPhyAddr()), curSingleV);
         attnOutQueue_.EnQue<outType>(attnOutLocal);
     }
 
@@ -1165,15 +1234,15 @@ private:
         betaInQueue_.EnQue<betaType>(betaLocal);
         betaLocal = betaInQueue_.DeQue<betaType>();
         if constexpr (std::is_same<betaType, float32_t>()) {
-            Adds(betaInUb, betaLocal, 0.0f, static_cast<uint32_t>(betaCount));
+            UnpackFlatVF<betaType>(reinterpret_cast<__ubuf__ float *>(betaInUb.GetPhyAddr()),
+                                   reinterpret_cast<__ubuf__ betaType *>(betaLocal.GetPhyAddr()), static_cast<uint32_t>(betaCount));
         } else {
-            Cast(betaInUb, betaLocal, AscendC::RoundMode::CAST_NONE, static_cast<uint32_t>(betaCount));
+            UnpackFlatVF<betaType>(reinterpret_cast<__ubuf__ float *>(betaInUb.GetPhyAddr()),
+                                   reinterpret_cast<__ubuf__ betaType *>(betaLocal.GetPhyAddr()), static_cast<uint32_t>(betaCount));
         }
         betaInQueue_.FreeTensor(betaLocal);
         PipeBarrier<PIPE_V>();
-        if (alignK_ != TWO_V_LENGTH) {
-            SyncVToS();
-        }
+
     }
 
     __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1, uint64_t head)
@@ -1257,10 +1326,7 @@ private:
                 uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
                 uint64_t curStateOutSlot = curStateSlot;
-                if (alignK_ != TWO_V_LENGTH) {
-                    beta_ = LoadBeta(betaOffset);
-                }
-                Compute(curSingleV, curQKOffset, curVOffset, betaOffset);
+                        Compute(curSingleV, curQKOffset, curVOffset, betaOffset);
                 if (attnOutBufferNum_ == BUFFER_NUM) {
                     CopyOutAttn(attnOffset, curSingleV);
                 } else {
