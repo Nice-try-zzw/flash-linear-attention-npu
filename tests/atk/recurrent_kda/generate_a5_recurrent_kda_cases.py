@@ -19,6 +19,7 @@ A6 约束与覆盖目标（见 docs/design_960dt.md）：
 用法：
     python generate_a5_recurrent_kda_cases.py --output atk_recurrent_kda_a6.json
     python generate_a5_recurrent_kda_cases.py --soc ascend950 --output atk_recurrent_kda_a5.json
+    python generate_a5_recurrent_kda_cases.py --sim   # 仿真用最小精度包（T<=33）-> atk_recurrent_kda_a6_sim.json
 """
 from __future__ import annotations
 
@@ -218,6 +219,115 @@ def iter_specs():
                    state_dtype="fp32" if i % 3 else "bf16", use_qk_l2norm_in_kernel=True)
 
 
+def iter_sim_specs():
+    """仿真友好的最小精度矩阵：所有用例 T<=33、单段 <=33 token，避免仿真超时。
+
+    覆盖原则（与全量矩阵一一对应，仅去掉大 T 档位）：
+      - 窗口边界：A6 窗口 32（BF16 / FP32 V-first）用 T=33 跨界，FP32 K-first 窗口 16 用 T=17 跨界；
+      - 分支：dense / uniform / ragged(含 0 段) / padding / 单头 / 超多段、V=256 兼容路径、
+        state 布局×dtype×inplace×initial_none×strided、gate safe/raw/dt_bias_none/large_gate、
+        slots packed/speculative × int32/int64、QKV view、output/inplace 语义、H/HV 比例。
+    """
+
+    def base(name, T, B, vf, sd, **extra):
+        spec = dict(name=name, T=T, B=B, H=2, HV=4, V=128,
+                    layout="TND", cu=True, state_v_first=vf, state_dtype=sd)
+        spec.update(extra)
+        return spec
+
+    # 1) dense（不传 cu_seqlens）：无 ssm_state_indices 的 state 写回合并路径
+    yield base("dense_S1_B2", 1, 2, True, "bf16", layout="BSND", cu=False)
+    yield base("dense_S8_B2", 8, 2, False, "fp32", layout="BSND", cu=False)
+    yield base("dense_S17_B2", 17, 2, False, "fp32", layout="BSND", cu=False)   # FP32 K-first 跨 16 窗口
+    yield base("dense_S33_B2_vf1", 33, 2, True, "bf16", layout="BSND", cu=False)  # 跨 32 窗口
+    yield base("dense_S33_B2_vf0", 33, 2, False, "bf16", layout="BSND", cu=False)  # BF16 K-first 跨 32 窗口
+
+    # 2) 均匀分段 packed
+    yield base("uniform_S9_B4", 9, 4, True, "fp32")
+    yield base("uniform_S17_B3", 17, 3, False, "bf16")
+
+    # 3) ragged（含 0 长度段 + 跨 32 窗口段）
+    yield base("ragged_B5_cap51", 33, 5, True, "fp32", lengths=[0, 1, 17, 0, 33])
+
+    # 4) padding：capacity > 有效 token，且 output 关闭
+    yield base("padding_B2_cap33", 17, 2, False, "bf16", lengths=[9, 17], padding=7, output=False)
+
+    # 5) 单头 H=HV=1 + l2norm 开/关
+    yield base("single_S33_l2", 33, 1, False, "bf16", H=1, HV=1, use_qk_l2norm_in_kernel=True)
+    yield base("single_S17_nol2", 17, 1, True, "fp32", H=1, HV=1, use_qk_l2norm_in_kernel=False)
+
+    # 6) 大量超短段：多任务调度 / bank 轮换
+    yield base("many_S2_B32", 2, 32, False, "bf16", inplace=True)
+
+    # 7) V=256 兼容路径（每段 <= 8）
+    yield base("v256_dense_S4", 4, 3, True, "bf16", V=256, layout="BSND", cu=False)
+    yield base("v256_dense_S8", 8, 2, False, "fp32", V=256, layout="BSND", cu=False)
+    yield base("v256_ragged", 8, 5, True, "bf16", V=256, lengths=[8, 0, 4, 1, 8])
+    yield base("v256_padding", 8, 3, False, "fp32", V=256, lengths=[8, 2, 8], padding=4)
+
+    # 8) state 布局 / dtype / inplace / initial_none / strided
+    yield base("state_vf1_fp32_ip0_str", 17, 2, True, "fp32", inplace=False, strided_state=True)
+    yield base("state_vf1_bf16_ip1", 17, 2, True, "bf16", inplace=True)
+    yield base("state_vf0_fp32_ip1_str", 17, 2, False, "fp32", inplace=True, strided_state=True)
+    yield base("state_vf0_bf16_none", 17, 2, False, "bf16", inplace=False, initial_none=True)
+
+    # 9) gate / beta 分支（全部 T<=17，large_gate 用小 T）
+    yield base("gate_safe_fp32", 9, 1, True, "fp32",
+               use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=True,
+               use_beta_sigmoid_in_kernel=True, allow_neg_eigval=True,
+               g_dtype="fp32", beta_dtype="fp32")
+    yield base("gate_raw_bf16fp16", 17, 1, False, "bf16",
+               use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=False,
+               use_beta_sigmoid_in_kernel=True, g_dtype="bf16", beta_dtype="fp16")
+    yield base("gate_raw_fp16bf16_nol2", 17, 1, True, "fp32",
+               use_qk_l2norm_in_kernel=False, use_gate_in_kernel=True, safe_gate=False,
+               use_beta_sigmoid_in_kernel=False, g_dtype="fp16", beta_dtype="bf16")
+    yield base("gate_off_sig", 16, 1, False, "bf16",
+               use_qk_l2norm_in_kernel=True, use_gate_in_kernel=False,
+               use_beta_sigmoid_in_kernel=True, g_dtype="fp32", beta_dtype="bf16")
+    yield base("gate_off_all", 17, 1, True, "fp32",
+               use_qk_l2norm_in_kernel=False, use_gate_in_kernel=False,
+               g_dtype="bf16", beta_dtype="fp32")
+    yield base("gate_dt_bias_none", 17, 1, True, "fp32",
+               use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
+               use_beta_sigmoid_in_kernel=True, dt_bias_none=True,
+               g_dtype="fp32", beta_dtype="fp32")
+    yield base("gate_large", 9, 1, False, "bf16",
+               use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, safe_gate=True,
+               use_beta_sigmoid_in_kernel=False, g_dtype="fp32", beta_dtype="fp16",
+               large_gate=True)
+
+    # 10) slot 索引：逐 token 落盘路径（packed/speculative × int32/int64 × output 开关）
+    yield base("slots_packed_i64", 17, 2, True, "bf16", indices="packed", accepted=9,
+               metadata_dtype="int64", inplace=True, output=False)
+    yield base("slots_packed_i32", 17, 2, False, "fp32", indices="packed", accepted=1,
+               metadata_dtype="int32", inplace=True, output=True)
+    yield base("slots_speculative_i32", 17, 2, False, "fp32", indices="speculative", accepted=17,
+               metadata_dtype="int32", inplace=True, output=True)
+    # dense（不传 cu_seqlens）+ indices 的组合
+    yield base("slots_packed_dense_i64", 17, 2, True, "bf16", indices="packed", accepted=9,
+               metadata_dtype="int64", inplace=True, output=False, layout="BSND", cu=False)
+
+    # 11) QKV view / 非连续
+    yield base("view_fused_str", 17, 2, True, "bf16", qkv_view="fused", strided_state=True)
+    yield base("view_head_gap_str", 17, 2, False, "fp32", qkv_view="head_gap", strided_state=True)
+    yield base("view_feature_gap_dense", 9, 2, False, "bf16", qkv_view="feature_gap",
+               layout="BSND", cu=False)
+    yield base("view_batch_gap_dense", 9, 2, True, "bf16", qkv_view="batch_gap",
+               layout="BSND", cu=False)
+
+    # 12) output/inplace 语义：全关、原位写回（推理 decode 常用路径）、全开 + 0 长度段
+    yield base("out0_ip0", 17, 2, False, "fp32", output=False, inplace=False)
+    yield base("out0_ip1", 17, 1, True, "bf16", output=False, inplace=True, lengths=[17])
+    yield base("out1_ip1_zl", 17, 3, False, "bf16", output=True, inplace=True, lengths=[0, 17, 0])
+
+    # 13) H/HV 比例（l2norm 开，T=33 跨 32 窗口）
+    yield base("ratio_H1_HV1", 33, 2, True, "bf16", H=1, HV=1, use_qk_l2norm_in_kernel=True)
+    yield base("ratio_H2_HV2", 33, 2, False, "bf16", H=2, HV=2, use_qk_l2norm_in_kernel=True)
+    yield base("ratio_H2_HV4", 33, 2, True, "fp32", H=2, HV=4, use_qk_l2norm_in_kernel=True)
+    yield base("ratio_H1_HV16", 33, 2, False, "fp32", H=1, HV=16, use_qk_l2norm_in_kernel=True)
+
+
 def _segments(spec):
     """返回每段长度列表（用于 V=256 上限校验）。"""
     if "lengths" in spec:
@@ -251,6 +361,11 @@ def set_attr(case, name, value):
 
 def build_case(template, case_id, spec, seed, soc, family="a6"):
     case = copy.deepcopy(template)
+    # A5/A6 包的精度标准统一为 cv_fused_double_benchmark（与既有 a5/a6 包一致），
+    # 模板来自 atk_recurrent_kda.json 的 mixed_tolerance_bm 不适用。
+    case["standard"]["acc"] = {"cv_fused_double_benchmark": {
+        "max_re_ratio": 5, "avg_re_ratio": 1.5,
+        "root_mean_squared_ratio": 1.5, "number_count_radio": 4}}
     lengths = spec.get("lengths")
     cu = bool(spec.get("cu", lengths is not None))
     layout = "TND" if cu else "BSND"
@@ -283,7 +398,11 @@ def build_case(template, case_id, spec, seed, soc, family="a6"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--template", default="atk_recurrent_kda.json")
-    parser.add_argument("--output", default="atk_recurrent_kda_a6.json")
+    parser.add_argument("--output", default=None,
+                        help="默认 atk_recurrent_kda_{a5|a6}.json；--sim 时为 atk_recurrent_kda_{a5|a6}_sim.json")
+    parser.add_argument("--sim", action="store_true",
+                        help="生成仿真友好的最小精度矩阵（T<=33，覆盖全部特性分支），"
+                             "用于仿真器上验证精度，避免大用例超时")
     parser.add_argument("--soc", default="ascend960dt",
                         help="ascend960dt（默认）/ascend950；A5 的 V=128 同样支持长序列")
     parser.add_argument("--max-cases", type=int, default=400)
@@ -291,12 +410,16 @@ def main():
                         help="每个结构重复的种子数；默认 1，不靠多 seed 堆用例")
     args = parser.parse_args()
 
+    family = "a5" if args.soc.endswith("950") else "a6"
+    if args.output is None:
+        args.output = f"atk_recurrent_kda_{family}_sim.json" if args.sim else f"atk_recurrent_kda_{family}.json"
+
     template = json.loads(Path(args.template).read_text(encoding="utf-8"))[0]
 
     cases, seen = [], set()
     long_v128 = 0
-    family = "a5" if args.soc.endswith("950") else "a6"
-    for spec in iter_specs():
+    specs = iter_sim_specs() if args.sim else iter_specs()
+    for spec in specs:
         spec = dict(spec)
         check(spec)
         lengths = spec.get("lengths")
