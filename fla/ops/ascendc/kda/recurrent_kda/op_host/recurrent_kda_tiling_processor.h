@@ -53,6 +53,14 @@ static constexpr int64_t RKDA_UB_GUARD_BYTES = 2048;
 static constexpr size_t RKDA_SYS_WORKSPACE_SIZE = 16U * 1024U * 1024U;
 // On A5, broadTmp aliases state in UB when K hits this fused-reduce size.
 static constexpr int64_t RKDA_FUSED_REDUCE_K = 128;
+// A6(DAV_9201) 静态 UB 引擎的布局常量，需与 op_kernel/arch92/recurrent_kda_engine.h 保持一致。
+static constexpr int64_t RKDA_A6_DIM = 128;
+static constexpr int64_t RKDA_A6_TOKEN_TILE = 16;
+// FP32 State bank 为 64 KiB，沿用 3 份；BF16 bank 为 32 KiB，多留一份用于初态预取。
+static constexpr int64_t RKDA_A6_FP32_STATE_BANKS = 3;
+static constexpr int64_t RKDA_A6_BF16_STATE_BANKS = 4;
+static constexpr int64_t RKDA_A6_INPUT_BUFFERS = 2;
+static constexpr int64_t RKDA_A6_PARAMETER_BUFFERS = 2;
 
 struct RecurrentKdaTilingContext {
     const char *nodeName = "RecurrentKda";
@@ -102,6 +110,8 @@ struct RecurrentKdaTilingContext {
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
     uint32_t isA5 = 0;
+    // A6(ascend960dt, DAV_9201)：V=128 走 arch92 静态 UB 引擎，UB 预算按平台实际值复核。
+    uint32_t isA6 = 0;
 };
 
 class RecurrentKdaTilingProcessor {
@@ -132,6 +142,10 @@ public:
 
     ge::graphStatus ProcessUb(RecurrentKdaTilingData &tiling) const
     {
+        if (ctx_.isA6 != 0 && tiling.dv == 128) {
+            // A6 的 V=128 由 arch92 静态 UB 引擎接管，UB 布局与 buffer 数在编译期确定。
+            return PlanA6Ub(tiling);
+        }
         struct RuleItem {
             const char *name;
             ge::graphStatus (RecurrentKdaTilingProcessor::*fn)(RecurrentKdaTilingData &, UbCalcContext &) const;
@@ -172,6 +186,40 @@ private:
     };
 
     RecurrentKdaTilingContext ctx_;
+
+    // arch92 引擎的静态 UB 用量：State bank + 输入/输出双槽 + dt_bias 双槽 + VF scratch。
+    int64_t A6StateBanks() const
+    {
+        return (ctx_.stateDtype == ge::DT_FLOAT) ? RKDA_A6_FP32_STATE_BANKS : RKDA_A6_BF16_STATE_BANKS;
+    }
+
+    int64_t CalcA6UbBytes() const
+    {
+        const int64_t stateBytes = (ctx_.stateDtype == ge::DT_FLOAT) ? 4 : 2;
+        const int64_t bankBytes = RKDA_A6_DIM * RKDA_A6_DIM * stateBytes;
+        const int64_t slotBytes = 4 * RKDA_A6_TOKEN_TILE * RKDA_A6_DIM * 2 + // q/k/v/out bf16
+                                  RKDA_A6_TOKEN_TILE * RKDA_A6_DIM * 4 +    // gate fp32
+                                  RKDA_A6_TOKEN_TILE * 32;                  // beta 与标量
+        return A6StateBanks() * bankBytes + RKDA_A6_INPUT_BUFFERS * slotBytes +
+               RKDA_A6_PARAMETER_BUFFERS * RKDA_A6_DIM * 4 + RKDA_A6_DIM * 4;
+    }
+
+    ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
+    {
+        const int64_t ubSize = static_cast<int64_t>(ctx_.ubSize);
+        const int64_t usedBytes = CalcA6UbBytes();
+        OP_CHECK_IF(usedBytes > ubSize,
+                    OP_LOGE(ctx_.nodeName, "A6 static UB needs %ld bytes but only %ld are available.",
+                            usedBytes, ubSize),
+                    return ge::GRAPH_FAILED);
+        tiling.ubCalSize = static_cast<uint32_t>(ctx_.ubSize);
+        tiling.ubRestBytes = static_cast<uint32_t>(ubSize - usedBytes);
+        // 引擎按 DIM 一次处理完整 V，并固定持有 stateOutBufferNum 个 State bank 与 2 份输入槽。
+        tiling.vStep = static_cast<uint32_t>(RKDA_A6_DIM);
+        tiling.stateOutBufferNum = static_cast<uint32_t>(A6StateBanks());
+        tiling.attnOutBufferNum = static_cast<uint32_t>(RKDA_A6_INPUT_BUFFERS);
+        return ge::GRAPH_SUCCESS;
+    }
 
     std::array<int64_t, RKDA_STATE_DIM_NUM> ResolveStateStrides(bool output) const
     {
@@ -562,6 +610,17 @@ private:
         tiling.keyHeadStride = static_cast<uint64_t>(keyStrides[headDim]);
         tiling.valueTokenStride = static_cast<uint64_t>(valueStrides[tokenDim]);
         tiling.valueHeadStride = static_cast<uint64_t>(valueStrides[headDim]);
+        // BSND 每个 batch 的首地址跨度；TND 只有一条序列，A6 引擎按 token 线性寻址。
+        const size_t batchDim = RKDA_DIM_0;
+        tiling.queryBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
+            static_cast<uint64_t>(tiling.seqLen) * tiling.queryTokenStride :
+            static_cast<uint64_t>(queryStrides[batchDim]);
+        tiling.keyBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
+            static_cast<uint64_t>(tiling.seqLen) * tiling.keyTokenStride :
+            static_cast<uint64_t>(keyStrides[batchDim]);
+        tiling.valueBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
+            static_cast<uint64_t>(tiling.seqLen) * tiling.valueTokenStride :
+            static_cast<uint64_t>(valueStrides[batchDim]);
         const auto stateInStrides = ResolveStateStrides(false);
         const auto stateOutStrides = ResolveStateStrides(true);
         tiling.stateInStride0 = static_cast<uint64_t>(stateInStrides[RKDA_DIM_0]);

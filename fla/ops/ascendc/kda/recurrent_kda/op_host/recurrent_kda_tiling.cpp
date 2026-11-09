@@ -12,6 +12,7 @@
  * \brief
  */
 #include "recurrent_kda_tiling.h"
+#include "../op_kernel/recurrent_kda_tiling_key.h"
 
 #include "err/ops_err.h"
 #include "log/log.h"
@@ -64,6 +65,7 @@ void RecurrentKdaTiling::InitCompileInfo()
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
     compileInfo_.isA5 = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510;
+    compileInfo_.isA6 = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201;
 
     if (compileInfo_.aivNum <= 0) {
         OP_LOGE(context_->GetNodeName(), "aivNum <= 0");
@@ -140,6 +142,7 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     ctx.aivNum = compileInfo_.aivNum;
     ctx.ubSize = compileInfo_.ubSize;
     ctx.isA5 = compileInfo_.isA5 ? 1 : 0;
+    ctx.isA6 = compileInfo_.isA6 ? 1 : 0;
     ctx.stateDtype = context_->GetInputDesc(STATE_INDEX)->GetDataType();
     ctx.gateDtype = context_->GetInputDesc(GATE_INDEX)->GetDataType();
     ctx.betaDtype = context_->GetInputDesc(BETA_INDEX)->GetDataType();
@@ -210,7 +213,20 @@ ge::graphStatus RecurrentKdaTiling::DoOpTiling()
 
 ge::graphStatus RecurrentKdaTiling::DoLibApiTiling()
 {
-    tilingKey_ = 0;
+    uint32_t kernelMode = RKDA_TPL_COMPAT;
+    if (compileInfo_.isA6 && tilingData_.dv == 128) {
+        // A6 的 V=128 由 arch92 静态 UB 引擎处理：State 布局决定 V/K 两条主线，
+        // norm + raw gate + dt_bias + beta sigmoid 且无负特征值时走预先融合的实例。
+        const bool fused = tilingData_.useQkL2norm != 0 && tilingData_.useGateInKernel != 0 &&
+            tilingData_.hasDtBias != 0 && tilingData_.useBetaSigmoid != 0 &&
+            tilingData_.allowNegEigval == 0 && tilingData_.safeGate == 0;
+        if (tilingData_.stateVFirst != 0) {
+            kernelMode = fused ? RKDA_TPL_V_FIRST_FUSED : RKDA_TPL_V_FIRST;
+        } else {
+            kernelMode = fused ? RKDA_TPL_K_FIRST_FUSED : RKDA_TPL_K_FIRST;
+        }
+    }
+    tilingKey_ = GET_TPL_TILING_KEY(kernelMode);
     return ge::GRAPH_SUCCESS;
 };
 
@@ -440,6 +456,12 @@ void RecurrentKdaTiling::PrintTilingData()
             static_cast<unsigned long long>(tilingData_.valueTokenStride));
     OP_LOGD(context_->GetNodeName(), "valueHeadStride: [%llu]",
             static_cast<unsigned long long>(tilingData_.valueHeadStride));
+    OP_LOGD(context_->GetNodeName(), "queryBatchStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.queryBatchStride));
+    OP_LOGD(context_->GetNodeName(), "keyBatchStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.keyBatchStride));
+    OP_LOGD(context_->GetNodeName(), "valueBatchStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.valueBatchStride));
 }
 
 ge::graphStatus RecurrentKdaTiling::CalUbSize()

@@ -71,6 +71,11 @@ struct alignas(8) RecurrentKdaTilingData {
     uint64_t keyHeadStride;
     uint64_t valueTokenStride;
     uint64_t valueHeadStride;
+    // BSND 的 batch 跨度：A6 静态 UB 引擎按 (token/seqLen)*batchStride 定位 batch，
+    // 因此 batch 维可以与 token 维之间存在间隔；A2/A3 与 A5 不读取该字段。
+    uint64_t queryBatchStride;
+    uint64_t keyBatchStride;
+    uint64_t valueBatchStride;
 };
 #pragma pack(pop)
 

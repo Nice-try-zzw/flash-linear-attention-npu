@@ -21,6 +21,8 @@ GDN recurrent 的函数接口。
 - 不提供内部 state 矩阵任意转置或步长采样的低性能 gather/scatter 路径。
 - 不支持把 `KdaGateCumsum` 的输出流水作为公开前置步骤。
 - A2/A3 通过第 17 节的时间窗口支持长序列；保持逐 token recurrent 公式和 AIV-only 路径。A5 仍限制每段长度 <=8。
+- A6（`ascend960dt`）与 A5 保持同一功能口径，但硬件预算不同：`V=128` 走 arch92 静态 UB 引擎并支持长序列，
+  `V=256` 走 arch92 的 RegBase 兼容实现（每段不超过 8 token）。
 
 ## 3. 能力边界
 
@@ -30,7 +32,7 @@ GDN recurrent 的函数接口。
 
 | 维度 | 支持范围 |
 | --- | --- |
-| SOC | `ascend910b`、`ascend910_93`、`ascend950` |
+| SOC | `ascend910b`、`ascend910_93`、`ascend950`、`ascend960dt` |
 | Layout | `BSND`、`TND` |
 | Q/K/V dtype | BF16 |
 | K/V | `K=128,V=128` 或 `K=128,V=256` |
@@ -82,6 +84,10 @@ o_t = S @ q_t
 - `op_host/recurrent_kda_tiling.cpp`：读取 Q/K/V 与输入/输出 state stride、shape、属性和可选输入存在性，
   填充 `RecurrentKdaTilingData`，计算 block dim 与 UB 切分。
 - `op_kernel/recurrent_kda.cpp`：单个 AIV kernel 完成 q/k normalize、raw gate 转换、state decay、delta 更新、输出和最终状态写回。
+- `op_kernel/arch92/recurrent_kda_engine.h`：A6（`ascend960dt`）`V=128` 的静态 UB 引擎，按 tiling key 与
+  `op_kernel/recurrent_kda_tiling_key.h` 的档位实例化。
+- `op_kernel/arch92/recurrent_kda_legacy.h` + `op_kernel/arch92/recurrent_kda_regbase.h`：A6 的 `V=256`
+  与未命中档位使用 A5 的兼容实现，逐元素/归约计算全部改为 RegBase，不保留 membase 向量实现。
 - `torch_custom/fla_npu/csrc/src/stable_recurrent_kda.cpp` + `fla_npu/ops/ascendc/_stable.py`：提供解耦的 Python 入口（Stable-ABI 适配层），不注册 legacy `torch.ops.npu`；`_aclnn_ctypes.py` 保留为参考实现与回退。
 - legacy `torch.ops.npu.npu_recurrent_kda` 不属于当前支持范围，不作为公共接口维护。
 
@@ -109,8 +115,9 @@ token capacity。
 | `ssmStateStride` | `uint32_t` | 二维 speculative state 索引的行 stride；packed 一维索引时为 0 |
 | `query/key/value TokenStride` | `uint64_t` | Q/K/V 相邻逻辑 token 的元素 stride |
 | `query/key/value HeadStride` | `uint64_t` | Q/K/V 相邻 head 的元素 stride |
+| `query/key/value BatchStride` | `uint64_t` | BSND 每个 batch 的首地址跨度；TND 为 `seqLen*tokenStride` |
 | `vStep` | `uint32_t` | 单次处理的 V 方向步长 |
-| `stateOutBufferNum` / `attnOutBufferNum` | `uint32_t` | UB ring buffer 数 |
+| `stateOutBufferNum` / `attnOutBufferNum` | `uint32_t` | UB ring buffer 数；A6 引擎下 `stateOutBufferNum` 表示 State bank 数 |
 | `scale` / `lowerBound` | `float` | query scale 与 safe gate 下界 |
 | `layout` | `uint32_t` | BSND/TND 编码 |
 | `has*` | `uint32_t` | 可选输入存在性 |
@@ -121,6 +128,12 @@ token capacity。
 当前 kernel 通过 `REGISTER_TILING_DEFAULT(RecurrentKdaTilingData)` 使用默认 tiling data，不引入额外 tiling key。
 dtype 固定为 BF16 QKV，state dtype 由编译宏 `DTYPE_INITIAL_STATE` 实例化；layout、gate/beta 分支和可选输入存在性由
 tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
+
+A6（`ascend960dt`）例外：`V=128` 的 arch92 静态 UB 引擎按 tiling key 生成实例，见
+`op_kernel/recurrent_kda_tiling_key.h`。`COMPAT=0` 表示沿用公共 kernel（A2/A3、A5 以及 A6 的 `V=256`）；
+`V_FIRST=1` / `K_FIRST=2` 对应两种 State 布局的通用实例；`V_FIRST_FUSED=3` / `K_FIRST_FUSED=4` 对应
+normalize + raw gate + dt_bias + beta sigmoid 且无负特征值 / 无 safe gate 的常用组合。
+其余属性（layout、gate/beta dtype、可选输入、inplace 输出）仍由 tiling data 驱动。
 
 ## 7. Kernel 设计
 
@@ -164,6 +177,7 @@ tiling data 驱动，避免把 runtime shape 组合扩张到 tiling key。
 | A2 | `ascend910b` | 公共 AIV kernel | 无 |
 | A3 | `ascend910_93` | 公共 AIV kernel | 无 |
 | A5 | `ascend950` | arch35 特化 AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
+| A6 | `ascend960dt` | arch92 特化 AIV kernel | `V=128` 静态 UB 引擎（State bank：BF16 4 份 / FP32 3 份、16 token/tile、资源 Mutex）；`V=256` 走 arch92 RegBase 兼容实现 |
 
 ## 9. 精度设计
 
@@ -174,6 +188,8 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 目标场景是 decode/MTP recurrent 小步长，主要瓶颈是状态矩阵读写和每 token 的 `S @ k`、`outer(delta,k)`、`S @ q`。
 当前实现已使用输入/输出双缓冲，并在 arch35 的 `K=128` 路径采用融合归约和 repeat DataCopy；后续优化仍应以
 状态搬运、向量流水和同步开销为重点。
+A6 的 `V=128` 路径复用同一套逐 token VF，但把 tile 扩到 16 token 以摊薄 tile 级 DMA 与 Mutex 开销；
+State bank 数按 dtype 取 BF16 4 份 / FP32 3 份，并用 host 读到的真实 UB 预算做容量复核。
 
 ## 11. 测试设计
 

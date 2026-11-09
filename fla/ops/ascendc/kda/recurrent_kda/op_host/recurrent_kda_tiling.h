@@ -27,6 +27,8 @@ struct RecurrentKdaCompileInfo {
     uint64_t aivNum{0UL};
     uint64_t ubSize{0UL};
     bool isA5{false};
+    // A6（DAV_9201）：V=128 走 arch92 静态 UB 引擎，V=256 沿用兼容实现。
+    bool isA6{false};
 };
 
 struct RecurrentKdaInfo {
