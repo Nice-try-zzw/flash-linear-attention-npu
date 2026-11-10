@@ -11,11 +11,13 @@
  * \file recurrent_kda_engine.h
  * \brief A6（DAV_9201）V=128 状态递推引擎：静态 UB、State bank 轮换、资源 Mutex 调度。
  *
- * 与 A5 的 `arch35/recurrent_kda_engine.h` 保持同一套算法与同步模型，差异只在
- * A6 的硬件预算上：
- *   - 每个 tile 的 token 数 4 -> 16：摊薄 tile 级的 DMA 与 Mutex 开销；
+ * 与主线 A5 的 RecurrentKdaEngine 保持同一套算法与同步模型，差异来自 A6 的硬件预算
+ * 与指令发射特性：
+ *   - 向量 UB 为 384 KiB，每个 tile 的 token 数 4 -> 32：摊薄 tile 级的 DMA 与 Mutex 开销；
  *   - bank 跨度按 State dtype 计算（BF16 32 KiB / FP32 64 KiB），不再按 FP32 预留；
- *   - BF16 State 多留一份 bank（3 -> 4）用于跨任务初态预取，FP32 仍保持 3 份以适配向量 UB。
+ *   - BF16 State 多留一份 bank（3 -> 4）用于跨任务初态预取，FP32 仍保持 3 份以适配向量 UB；
+ *   - A6 向量单元支持一长两短的三指令发射，V-first 热循环按四行展开，把独立的
+ *     乘法/归约/搬出短指令交错到归约长指令的发射槽里。
  * 逐 token 的 VF 数学与 A5 完全一致（同样的 FMA 与归约顺序），因此精度口径不变。
  */
 
@@ -32,8 +34,10 @@ using namespace AscendC::MicroAPI;
 using RecurrentKda::RecurrentKdaTilingData;
 
 constexpr uint32_t DIM = 128;
-// A6 每个 tile 的 token 上界：State bank 之外仍留出充足 UB 余量。
-constexpr uint32_t TOKEN_TILE = 16;
+// A6 每个 tile 的 token 上界：取 32 是为了在 384 KiB UB 内摊薄 tile 级开销，
+// 同时给 State bank 与双槽输入留出余量（FP32 布局下仍余约 90 KiB）。
+constexpr uint32_t TOKEN_TILE = 32;
+constexpr uint32_t LAYOUT_BSND = 0;
 // FP32 bank 为 64 KiB，沿用 A5 已验证的 3 份布局；BF16 bank 为 32 KiB，
 // A6 多留一份用于跨任务初态预取。host 侧按真实 UB 预算复核。
 template <typename State>
@@ -74,10 +78,10 @@ constexpr uint32_t UbBytes()
 }
 
 // 编译期只做保守校验；A6 实际 UB 由 host 读取平台信息后复核。
-// FP32 State（3 bank）占 248 320 B，BF16 State（4 bank）占 182 784 B。
-constexpr uint32_t UB_LIMIT_BYTES = 256 * 1024;
-static_assert(UbBytes<float>() <= UB_LIMIT_BYTES, "A6 FP32 State UB exceeds capacity");
-static_assert(UbBytes<bfloat16_t>() <= UB_LIMIT_BYTES, "A6 BF16 State UB exceeds capacity");
+// FP32 State（3 bank）占 298 496 B，BF16 State（4 bank）占 232 960 B。
+constexpr uint32_t UB_LIMIT_BYTES = 384 * 1024;
+static_assert(UbBytes<float>() <= UB_LIMIT_BYTES, "A6 FP32 State UB exceeds the 384 KiB vector UB");
+static_assert(UbBytes<bfloat16_t>() <= UB_LIMIT_BYTES, "A6 BF16 State UB exceeds the 384 KiB vector UB");
 
 // Mutex 编号由本引擎独占：input/out 各两份、State 至多四份、参数两份。
 constexpr uint8_t INPUT_MUTEX[INPUT_BUFFERS] = {3, 4};
@@ -173,7 +177,9 @@ __simd_callee__ inline void StoreVFirstRows(__ubuf__ State *target, uint16_t row
     }
 }
 
-// 第二遍：逐两行重读源 bank，广播 residual，更新 State 并把 out 收集到 UB。
+// 第二遍：逐四行重读源 bank，广播 residual，更新 State 并把 out 收集到 UB。
+// 四行一组是为了配合 A6 的一长两短三指令发射：两组两行之间没有依赖，
+// 归约长指令发射时另一组的乘法/搬出短指令可以填满其余发射槽。
 template <typename State>
 __simd_callee__ inline void RecurrentKdaVFirstUpdateRows(
     __ubuf__ State *target, __ubuf__ State *source, __ubuf__ bfloat16_t *&outputAddress,
@@ -185,31 +191,60 @@ __simd_callee__ inline void RecurrentKdaVFirstUpdateRows(
     UnalignRegForStore &outputStore)
 {
     #pragma unroll 1
-    for (uint16_t row = 0; row < DIM; row += 2) {
-        RegTensor<float> s0, s1, s2, s3, residual0, residual1, dot0, dot1, out0, out1;
+    for (uint16_t row = 0; row < DIM; row += 4) {
+        RegTensor<float> s0, s1, s2, s3, s4, s5, s6, s7;
+        RegTensor<float> residual0, residual1, residual2, residual3;
+        RegTensor<float> dot0, dot1, dot2, dot3, out0, out1, out2, out3;
         RegTensor<bfloat16_t> packedOut;
+        // 四行 residual 与 State 先全部载入，后面的计算只依赖寄存器。
         LoadAlign<float, LoadDist::DIST_BRC_B32>(residual0, residual + row);
         LoadAlign<float, LoadDist::DIST_BRC_B32>(residual1, residual + row + 1);
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(residual2, residual + row + 2);
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(residual3, residual + row + 3);
         LoadPair(s0, s1, source + row * DIM, mask16);
         LoadPair(s2, s3, source + (row + 1) * DIM, mask16);
+        LoadPair(s4, s5, source + (row + 2) * DIM, mask16);
+        LoadPair(s6, s7, source + (row + 3) * DIM, mask16);
+        // 衰减与更新：八条互相独立的短指令。
         Mul(s0, s0, decayEven, mask);
-        Mul(s2, s2, decayEven, mask);
         Mul(s1, s1, decayOdd, mask);
+        Mul(s2, s2, decayEven, mask);
         Mul(s3, s3, decayOdd, mask);
+        Mul(s4, s4, decayEven, mask);
+        Mul(s5, s5, decayOdd, mask);
+        Mul(s6, s6, decayEven, mask);
+        Mul(s7, s7, decayOdd, mask);
         MulAddDst(s0, residual0, updateKeyEven, mask);
-        MulAddDst(s2, residual1, updateKeyEven, mask);
         MulAddDst(s1, residual0, updateKeyOdd, mask);
+        MulAddDst(s2, residual1, updateKeyEven, mask);
         MulAddDst(s3, residual1, updateKeyOdd, mask);
+        MulAddDst(s4, residual2, updateKeyEven, mask);
+        MulAddDst(s5, residual2, updateKeyOdd, mask);
+        MulAddDst(s6, residual3, updateKeyEven, mask);
+        MulAddDst(s7, residual3, updateKeyOdd, mask);
+        // out = <state, q>：四行各两条短指令。
         Mul(dot0, s0, queryEven, mask);
         Mul(dot1, s2, queryEven, mask);
+        Mul(dot2, s4, queryEven, mask);
+        Mul(dot3, s6, queryEven, mask);
         MulAddDst(dot0, s1, queryOdd, mask);
         MulAddDst(dot1, s3, queryOdd, mask);
+        MulAddDst(dot2, s5, queryOdd, mask);
+        MulAddDst(dot3, s7, queryOdd, mask);
+        // 四条归约长指令连续发射，前后的短指令可与之并行。
         ReduceSum(out0, dot0, mask);
         ReduceSum(out1, dot1, mask);
+        ReduceSum(out2, dot2, mask);
+        ReduceSum(out3, dot3, mask);
         StoreVFirstRows(target, row, s0, s1, s2, s3, mask, mask16);
+        StoreVFirstRows(target, row + 2, s4, s5, s6, s7, mask, mask16);
         Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out0, first);
         StoreUnAlign(outputAddress, packedOut, outputStore, 1);
         Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out1, first);
+        StoreUnAlign(outputAddress, packedOut, outputStore, 1);
+        Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out2, first);
+        StoreUnAlign(outputAddress, packedOut, outputStore, 1);
+        Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out3, first);
         StoreUnAlign(outputAddress, packedOut, outputStore, 1);
     }
 }
@@ -229,20 +264,31 @@ __simd_callee__ inline void RecurrentKdaVFirstTwoPass(
     Mul(decayKeyOdd, decayOdd, keyOdd, mask);
     UnalignRegForStore predictionStore;
     __ubuf__ float *predictionAddress = scratch;
-    // 第一遍只归约 prediction，State 寄存器随即释放。
+    // 第一遍只归约 prediction，State 寄存器随即释放；同样按四行展开以填满发射槽。
     #pragma unroll 1
-    for (uint16_t row = 0; row < DIM; row += 2) {
-        RegTensor<float> s0, s1, s2, s3, dot0, dot1, prediction0, prediction1;
+    for (uint16_t row = 0; row < DIM; row += 4) {
+        RegTensor<float> s0, s1, s2, s3, s4, s5, s6, s7;
+        RegTensor<float> dot0, dot1, dot2, dot3, prediction0, prediction1, prediction2, prediction3;
         LoadPair(s0, s1, source + row * DIM, mask16);
         LoadPair(s2, s3, source + (row + 1) * DIM, mask16);
+        LoadPair(s4, s5, source + (row + 2) * DIM, mask16);
+        LoadPair(s6, s7, source + (row + 3) * DIM, mask16);
         Mul(dot0, s0, decayKeyEven, mask);
         Mul(dot1, s2, decayKeyEven, mask);
+        Mul(dot2, s4, decayKeyEven, mask);
+        Mul(dot3, s6, decayKeyEven, mask);
         MulAddDst(dot0, s1, decayKeyOdd, mask);
         MulAddDst(dot1, s3, decayKeyOdd, mask);
+        MulAddDst(dot2, s5, decayKeyOdd, mask);
+        MulAddDst(dot3, s7, decayKeyOdd, mask);
         ReduceSum(prediction0, dot0, mask);
         ReduceSum(prediction1, dot1, mask);
+        ReduceSum(prediction2, dot2, mask);
+        ReduceSum(prediction3, dot3, mask);
         StoreUnAlign(predictionAddress, prediction0, predictionStore, 1);
         StoreUnAlign(predictionAddress, prediction1, predictionStore, 1);
+        StoreUnAlign(predictionAddress, prediction2, predictionStore, 1);
+        StoreUnAlign(predictionAddress, prediction3, predictionStore, 1);
     }
     StoreUnAlignPost(predictionAddress, predictionStore, 0);
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
@@ -509,6 +555,8 @@ public:
             const uint64_t request = task / tiling_->nv;
             const uint64_t head = task % tiling_->nv;
             UpdateSequence(request);
+            // 空请求不产生输出，跳过即可；元数据越界（slot 超出 state 池）说明入参
+            // 非法，本核后续任务同属一份元数据，直接结束整个循环。
             if (sequenceBegin_ == sequenceEnd_) continue;
             if (!ValidateSlots(request)) break;
             const uint64_t initialSlot = InitialSlot(request);
@@ -520,6 +568,9 @@ public:
             stateReadyEvent = false;
             Mutex::Lock<PIPE_MTE2>(STATE_MUTEX[currentBank]);
             CopyStateIn(currentBank, initialSlot, head);
+            // 初态搬入（MTE2）与首个 token 的 VF 读之间没有共享 Mutex：
+            // V 侧只锁下一个 bank，因此必须显式建立 MTE2 -> V 的 RAW 依赖。
+            SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
             Mutex::Unlock<PIPE_MTE2>(STATE_MUTEX[currentBank]);
             // 参数槽只对真正执行的任务轮换，空请求不推进。
             if (usesBias) {
@@ -536,6 +587,8 @@ public:
                 stateReadyEvent = true;
             }
             if (usesBias) Mutex::Lock<PIPE_V>(PARAMETER_MUTEX[parameterBuffer]);
+            // 等待本任务初态搬入完成后再启动第一个 token 的 VF。
+            WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
             for (int64_t start = sequenceBegin_; start < sequenceEnd_; start += TOKEN_TILE) {
                 const uint16_t rows = static_cast<uint16_t>(
                     (sequenceEnd_ - start < TOKEN_TILE) ? (sequenceEnd_ - start) : TOKEN_TILE);
@@ -686,36 +739,30 @@ private:
         return StateSlot(request, token);
     }
 
+    // State 的 GM 地址与 stride 由调用方给出，host 只校验形状与不重叠，
+    // 不保证 32 B 对齐，因此搬入/搬出一律走 DataCopyPad。
     __aicore__ inline void CopyStateIn(uint32_t bank, uint64_t slot, uint64_t head)
     {
         const uint64_t offset = slot * tiling_->stateInStride0 + head * tiling_->stateInStride1;
-        if (tiling_->stateInStride2 == DIM) {
-            DataCopy(stateBanks_[bank], stateGm_[offset], DIM * DIM);
-        } else {
-            const DataCopyExtParams params{DIM, DIM * sizeof(State),
-                uint32_t((tiling_->stateInStride2 - DIM) * sizeof(State)), 0, 0};
-            DataCopyPad(stateBanks_[bank], stateGm_[offset], params,
-                DataCopyPadExtParams<State>{false, 0, 0, State(0)});
-        }
+        const DataCopyExtParams params{DIM, DIM * sizeof(State),
+            uint32_t((tiling_->stateInStride2 - DIM) * sizeof(State)), 0, 0};
+        DataCopyPad(stateBanks_[bank], stateGm_[offset], params,
+            DataCopyPadExtParams<State>{false, 0, 0, State(0)});
     }
 
     __aicore__ inline void CopyStateOut(uint32_t bank, uint64_t slot, uint64_t head)
     {
         const uint64_t offset = slot * tiling_->stateOutStride0 + head * tiling_->stateOutStride1;
-        if (tiling_->stateOutStride2 == DIM) {
-            DataCopy(stateOutGm_[offset], stateBanks_[bank], DIM * DIM);
-        } else {
-            const DataCopyExtParams params{DIM, DIM * sizeof(State), 0,
-                uint32_t((tiling_->stateOutStride2 - DIM) * sizeof(State)), 0};
-            DataCopyPad(stateOutGm_[offset], stateBanks_[bank], params);
-        }
+        const DataCopyExtParams params{DIM, DIM * sizeof(State), 0,
+            uint32_t((tiling_->stateOutStride2 - DIM) * sizeof(State)), 0};
+        DataCopyPad(stateOutGm_[offset], stateBanks_[bank], params);
     }
 
     // BSND 的 token 轴按 batch 行组织，允许 batch 与 token 维之间存在间隔。
     __aicore__ inline uint64_t InputOffset(int64_t token, uint64_t head, uint64_t batchStride,
         uint64_t tokenStride, uint64_t headStride) const
     {
-        if (tiling_->layout == 0 && !tiling_->hasCuSeqlens) {
+        if (tiling_->layout == LAYOUT_BSND && !tiling_->hasCuSeqlens) {
             return (uint64_t(token) / tiling_->seqLen) * batchStride +
                 (uint64_t(token) % tiling_->seqLen) * tokenStride + head * headStride;
         }

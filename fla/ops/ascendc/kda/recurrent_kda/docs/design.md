@@ -177,7 +177,7 @@ normalize + raw gate + dt_bias + beta sigmoid 且无负特征值 / 无 safe gate
 | A2 | `ascend910b` | 公共 AIV kernel | 无 |
 | A3 | `ascend910_93` | 公共 AIV kernel | 无 |
 | A5 | `ascend950` | arch35 特化 AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
-| A6 | `ascend960dt` | arch92 特化 AIV kernel | `V=128` 静态 UB 引擎（State bank：BF16 4 份 / FP32 3 份、16 token/tile、资源 Mutex）；`V=256` 走 arch92 RegBase 兼容实现 |
+| A6 | `ascend960dt` | arch92 特化 AIV kernel | `V=128` 静态 UB 引擎（State bank：BF16 4 份 / FP32 3 份、32 token/tile、资源 Mutex）；`V=256` 走 arch92 RegBase 兼容实现，host 对 dense 布局拒绝每段超过 8 token |
 
 ## 9. 精度设计
 
@@ -188,8 +188,14 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 目标场景是 decode/MTP recurrent 小步长，主要瓶颈是状态矩阵读写和每 token 的 `S @ k`、`outer(delta,k)`、`S @ q`。
 当前实现已使用输入/输出双缓冲，并在 arch35 的 `K=128` 路径采用融合归约和 repeat DataCopy；后续优化仍应以
 状态搬运、向量流水和同步开销为重点。
-A6 的 `V=128` 路径复用同一套逐 token VF，但把 tile 扩到 16 token 以摊薄 tile 级 DMA 与 Mutex 开销；
-State bank 数按 dtype 取 BF16 4 份 / FP32 3 份，并用 host 读到的真实 UB 预算做容量复核。
+A6 的 `V=128` 路径复用同一套逐 token VF，但按 384 KiB 向量 UB 把 tile 扩到 32 token 以摊薄 tile 级
+DMA 与 Mutex 开销（FP32 State 3 bank 布局共 298 496 B，另留 2 KiB 余量）；State bank 数按 dtype
+取 BF16 4 份 / FP32 3 份，并用 host 读到的真实 UB 预算做容量复核。
+V-first 热循环按四行展开：A6 向量单元每个发射槽为一长两短，四行之间没有依赖，归约长指令
+（`ReduceSum`）发射时另一组的乘加/转换/搬出短指令可填入其余发射槽。
+初态搬入（MTE2）与首个 token 的 VF 读之间没有共享 Mutex（V 侧只锁下一个 bank），引擎显式用
+`SetFlag<HardEvent::MTE2_V>` / `WaitFlag` 建立 RAW 依赖；state 的搬入/搬出一律走 `DataCopyPad`，
+因为 host 只校验 state stride 的形状与不重叠，不保证 GM 基址 32 B 对齐。
 
 ## 11. 测试设计
 

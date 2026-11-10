@@ -21,7 +21,7 @@ CPU 标杆、输入构造、run_cpu、run_npu 和 FunctionApi 均在本目录的
 
 ## SOC 支持
 
-YAML 元信息覆盖 `ascend910b`、`ascend910_93` 和 `ascend950`，可配合统一脚本的 `-soc=ascend910b|ascend910_93|ascend950` 使用。
+YAML 元信息覆盖 `ascend910b`、`ascend910_93`、`ascend950` 和 `ascend960dt`，可配合统一脚本的 `-soc=ascend910b|ascend910_93|ascend950|ascend960dt` 使用。`ascend960dt` 用例覆盖 A6 的 arch92 静态 UB 引擎（`V=128`、`state_v_first=true`）。
 
 ## 默认用例
 

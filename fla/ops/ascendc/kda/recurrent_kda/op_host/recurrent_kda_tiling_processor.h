@@ -55,7 +55,8 @@ static constexpr size_t RKDA_SYS_WORKSPACE_SIZE = 16U * 1024U * 1024U;
 static constexpr int64_t RKDA_FUSED_REDUCE_K = 128;
 // A6(DAV_9201) 静态 UB 引擎的布局常量，需与 op_kernel/arch92/recurrent_kda_engine.h 保持一致。
 static constexpr int64_t RKDA_A6_DIM = 128;
-static constexpr int64_t RKDA_A6_TOKEN_TILE = 16;
+// A6 向量 UB 为 384 KiB，每 tile 32 个 token；与 arch92 引擎的 TOKEN_TILE 保持一致。
+static constexpr int64_t RKDA_A6_TOKEN_TILE = 32;
 // FP32 State bank 为 64 KiB，沿用 3 份；BF16 bank 为 32 KiB，多留一份用于初态预取。
 static constexpr int64_t RKDA_A6_FP32_STATE_BANKS = 3;
 static constexpr int64_t RKDA_A6_BF16_STATE_BANKS = 4;
@@ -207,14 +208,16 @@ private:
     ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
     {
         const int64_t ubSize = static_cast<int64_t>(ctx_.ubSize);
-        const int64_t usedBytes = CalcA6UbBytes();
+        // 静态布局之外再留出 2 KiB 余量，避免与框架占用的尾部空间重叠。
+        const int64_t usedBytes = CalcA6UbBytes() + RKDA_UB_GUARD_BYTES;
         OP_CHECK_IF(usedBytes > ubSize,
                     OP_LOGE(ctx_.nodeName, "A6 static UB needs %ld bytes but only %ld are available.",
                             usedBytes, ubSize),
                     return ge::GRAPH_FAILED);
         tiling.ubCalSize = static_cast<uint32_t>(ctx_.ubSize);
         tiling.ubRestBytes = static_cast<uint32_t>(ubSize - usedBytes);
-        // 引擎按 DIM 一次处理完整 V，并固定持有 stateOutBufferNum 个 State bank 与 2 份输入槽。
+        // arch92 引擎在编译期自行布局并一次处理完整 V，以下字段只用于保持与兼容路径
+        // 相同的 tiling 语义，引擎不读取。
         tiling.vStep = static_cast<uint32_t>(RKDA_A6_DIM);
         tiling.stateOutBufferNum = static_cast<uint32_t>(A6StateBanks());
         tiling.attnOutBufferNum = static_cast<uint32_t>(RKDA_A6_INPUT_BUFFERS);
@@ -544,6 +547,16 @@ private:
                     OP_LOGE(ctx_.nodeName, "HV must be an integer multiple of H, but HV is %ld and H is %ld.",
                             hvNum, hNum),
                     return ge::GRAPH_FAILED);
+        // A6 只有 V=128 走静态 UB 引擎；V 取其它值时回落到兼容实现，该实现按每段
+        // 至多 RKDA_MAX_MTP 个 token 分配缓冲。kernel 无法对超长段报错，因此在 host
+        // 侧对可静态判定的布局直接拒绝。
+        if (ctx_.isA6 != 0 && vDim != RKDA_A6_DIM && ctx_.hasCuSeqlens == 0 &&
+            denseSeqLen > static_cast<int64_t>(RKDA_MAX_MTP)) {
+            OP_LOGE(ctx_.nodeName,
+                    "A6 V=%ld only supports segments of at most %zu tokens, but the sequence length is %ld.",
+                    vDim, RKDA_MAX_MTP, denseSeqLen);
+            return ge::GRAPH_FAILED;
+        }
         if (!CheckDim(stateShape, RKDA_STATE_DIM_NUM, "initial_state")) {
             return ge::GRAPH_FAILED;
         }
