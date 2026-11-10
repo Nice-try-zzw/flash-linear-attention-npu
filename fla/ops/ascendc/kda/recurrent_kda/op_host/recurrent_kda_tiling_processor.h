@@ -853,10 +853,19 @@ private:
             return ge::GRAPH_FAILED;
         }
         if (ctx_.isA5 == 0) {
+            // A6 legacy 路径启用 BUFFER_NUM=2 双槽 ping-pong：slot 1 比 slot 0 多分配一份
+            // v/q/k/beta/gate 输入缓冲。stateInUb 和 gateBiasInUb 是共享工作区，不随 slot
+            // 切换，不需要额外预算。
+            const int64_t betaHeads = ctx_.isA5 != 0 ? ubCalcCtx.aNv : static_cast<int64_t>(tiling.nv);
+            const int64_t extraSlotBytes =
+                RKDA_MAX_MTP * (4 * ubCalcCtx.aDv + 12 * aDk + 4 * betaHeads);
             const int64_t tmpBytes = ubCalcCtx.workingUbBytes - ubCalcCtx.fixedUbBytes +
-                                     CalcComputeUbCoeff(aDk) * static_cast<int64_t>(selected.vStep);
+                                     CalcComputeUbCoeff(aDk) * static_cast<int64_t>(selected.vStep) +
+                                     extraSlotBytes;
             if (tmpBytes > ubRestBytes) {
-                OP_LOGE(ctx_.nodeName, "packed input buffers exceed the UB budget");
+                OP_LOGE(ctx_.nodeName, "packed input buffers (dual slot) exceed the UB budget: "
+                                       "need %ld, available %ld (vStep=%ld aDk=%ld aDv=%ld)",
+                        tmpBytes, ubRestBytes, selected.vStep, aDk, ubCalcCtx.aDv);
                 return ge::GRAPH_FAILED;
             }
             // Generic A2/A3 kernels allocate only named live scratch slices.

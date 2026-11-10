@@ -31,7 +31,7 @@ using namespace AscendC::MicroAPI;
 // 输入缓冲使用双槽，让 MTE2 搬下一个窗口与 VF 消费当前窗口在窗口间流水重叠。
 // host CalcFixedUbBytes 对 A6 已按 rawBufferNum=2 核算预算；本路径（非 V=128 静态引擎）
 // 走 legacy 5 步流程，vStep 由 FinalizeVStepFromUb 从剩余 UB 里切出。
-constexpr uint64_t BUFFER_NUM = 1;
+constexpr uint64_t BUFFER_NUM = 2;
 constexpr uint64_t INPUT_BUFFER_NUM = 2;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 // 单次搬入的 token 数上限。段长超过该值时按窗口顺序递推，不是段长限制。
@@ -266,29 +266,46 @@ public:
         pipe_->InitBuffer(scalarBuf_, 64);
 
         uint32_t buffOffset = 0;
-        // 共享工作区（不随 slot 切换）：delta/attn/state/gateBias 跨窗口原地续接或复用。
+        // 共享工作区（不随 slot 切换）：delta/attn 跨窗口原地续接。
         deltaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
         buffOffset += singleVSize;
         attnInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
         buffOffset += singleVSize;
-        stateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
-        buffOffset += cubeSize;
-        gateBiasInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_), buffOffset);
-        buffOffset += static_cast<uint32_t>(alignK_ * sizeof(float));
 
-        // ===== 输入缓冲（当前用单槽 BUFFER_NUM=1；host tmpBytes 只核算了单槽输入预算） =====
+        // ===== slot 0 输入缓冲 =====
+        // 顺序：v→q→k→state→gateBias→beta→gate。state 放在 k 之后，避免与 v 产生 bank conflict
+        // （Compute 中 VF 会同时访问 vInUb 和 stateInUb；若 state 放在 v 之前，起点 bank 差一个
+        //  bank stride，两个大 buffer 很容易在同一 VF cycle 落到同 bank）。
         vInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
         buffOffset += vSize;
         qInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
         buffOffset += kSize;
         kInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
         buffOffset += kSize;
+
+        // state + gateBias：跨窗口原地续接，不随 slot 切换（只分配一份）。
+        stateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
+        buffOffset += cubeSize;
+        gateBiasInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_), buffOffset);
+        buffOffset += static_cast<uint32_t>(alignK_ * sizeof(float));
+
         betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
         buffOffset += betaUbSize;
         gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
         buffOffset += kSize;
-        // TODO: 真正的 ping-pong 双槽需要 host 端额外加一份 slot 预算到 tmpBytes。
-        // 现在先留空 slot 1 的 LocalTensor 成员，但不分配，等 host 预算到位后再启用。
+
+        // ===== slot 1 输入缓冲（紧接 slot 0 之后，buffOffset 自然推进，绝无地址重叠） =====
+        // stateInUb / gateBiasInUb 共享 slot 0，不分配第二份。
+        vInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
+        buffOffset += vSize;
+        qInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+        kInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+        betaInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
+        buffOffset += betaUbSize;
+        gateInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
     }
 
     __aicore__ inline void SyncMte2ToV()
@@ -1376,18 +1393,53 @@ private:
             bool hasPendingState = false;
             // 段长超过输入窗口时按窗口顺序递推：state 在同一个 v-tile 内跨窗口原地续接，
             // 只有 Q/K/V/gate/beta 的窗口缓冲被重新搬入。双槽 ping-pong：slot 0 与 slot 1
-            // 在窗口间交替，让 MTE2 搬下一窗口与 VF 消费当前窗口不再共用同一块输入 UB。
+            // 在窗口间交替，MTE2 搬 W+1 与 VF Compute W 真流水重叠。
+            //
+            // 流水线时序（假设 3 个窗口）:
+            //   W0: Start+End+Compute（同步完整搬入）
+            //        ↓ 对 W1 异步 Start
+            //   W1: End（等 MTE2） → Compute（此时 MTE2 可能已经在搬 W2）
+            //        ↓ 对 W2 异步 Start
+            //   W2: End → Compute
+            //
+            // 这样 MTE2 latency 完全被 VF Compute latency 掩盖，只有 W0 是完整同步的。
             int64_t windowStart = seq0;
             uint32_t slot = 0;
+            const int64_t totalLen = seq1 - seq0;
+
+            // ===== W0: 完整同步搬入 =====
+            if (windowStart < seq1) {
+                const int32_t win0Len = static_cast<int32_t>(
+                    totalLen < static_cast<int64_t>(MAX_MTP) ? totalLen : static_cast<int64_t>(MAX_MTP));
+                const int64_t win0End = windowStart + win0Len;
+                CopyInBetaStart(windowStart, win0End, head_i);
+                CopyInBetaEnd(win0End, windowStart, slot);
+                CopyInQKVGateStart(windowStart, win0Len, head_i);
+                CopyInQKVGateEnd(win0Len, head_i, slot);
+
+                // ===== 对 W1 异步发起 MTE2（不阻塞 VF）=====
+                windowStart = win0End;
+                slot ^= 1;
+                if (windowStart < seq1) {
+                    const int64_t nextLen = windowStart + MAX_MTP < seq1
+                                               ? static_cast<int64_t>(MAX_MTP)
+                                               : seq1 - windowStart;
+                    CopyInBetaStart(windowStart, windowStart + nextLen, head_i);
+                    CopyInQKVGateStart(windowStart, static_cast<int32_t>(nextLen), head_i);
+                }
+            }
+
             while (windowStart < seq1) {
                 const int64_t remaining = seq1 - windowStart;
                 const int32_t windowLen = static_cast<int32_t>(
                     remaining < static_cast<int64_t>(MAX_MTP) ? remaining : static_cast<int64_t>(MAX_MTP));
                 const int64_t windowEnd = windowStart + windowLen;
-                // VF 指令天然顺序，CopyInQKVGate 末尾的 PipeBarrier 已排空所有 VF 操作，
-                // 新窗口开始时 VF 本来就是空的——无需空等。
-                CopyInBeta(windowStart, windowEnd, head_i, slot);
-                CopyInQKVGate(windowStart, windowLen, head_i, slot);
+
+                // ===== End: DeQue 阻塞等 MTE2 + VF Unpack 到 slot UB + PipeBarrier =====
+                // 这里 MTE2 数据在 W0 的 VF Compute 期间已经搬了一段时间，DeQue 等待被掩盖。
+                CopyInBetaEnd(windowEnd, windowStart, slot);
+                CopyInQKVGateEnd(windowLen, head_i, slot);
+
                 for (int64_t seq_i = windowStart; seq_i < windowEnd; seq_i++) {
                     const uint64_t localIdx = static_cast<uint64_t>(seq_i - windowStart);
                     uint64_t betaOffset = localIdx;
@@ -1418,8 +1470,17 @@ private:
                         }
                     }
                 }
+
+                // ===== 对 W+1 异步发起 MTE2 =====
                 windowStart = windowEnd;
-                // slot 暂固定为 0（BUFFER_NUM=1），等 host 端 tmpBytes 加入双槽输入预算后再启用 slot^=1。
+                slot ^= 1;
+                if (windowStart < seq1) {
+                    const int64_t nextLen = windowStart + MAX_MTP < seq1
+                                               ? static_cast<int64_t>(MAX_MTP)
+                                               : seq1 - windowStart;
+                    CopyInBetaStart(windowStart, windowStart + nextLen, head_i);
+                    CopyInQKVGateStart(windowStart, static_cast<int32_t>(nextLen), head_i);
+                }
             }
             if (hasPendingAttn) {
                 CopyOutAttn(pendingAttnOffset, curSingleV);
