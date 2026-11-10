@@ -67,8 +67,12 @@ void RecurrentKdaTiling::InitCompileInfo()
     compileInfo_.isA5 = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510;
     compileInfo_.isA6 = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201;
 
-    if (compileInfo_.aivNum <= 0) {
-        OP_LOGE(context_->GetNodeName(), "aivNum <= 0");
+    if (compileInfo_.ubSize == 0) {
+        OP_LOGE(context_->GetNodeName(), "ubSize == 0");
+        return;
+    }
+    if (compileInfo_.aivNum == 0) {
+        OP_LOGE(context_->GetNodeName(), "aivNum == 0");
         return;
     }
     tilingData_.vectorCoreNum = static_cast<uint32_t>(compileInfo_.aivNum);
@@ -384,6 +388,9 @@ ge::graphStatus RecurrentKdaTiling::GetAttrsInfo()
         return ge::GRAPH_FAILED;
     }
     tilingData_.scale = *attrs->GetAttrPointer<float>(ATTR_SCALE_INDEX);
+    OP_CHECK_IF(tilingData_.scale <= 0.0f,
+                OP_LOGE(context_->GetNodeName(), "scale must be positive, got %f", tilingData_.scale),
+                return ge::GRAPH_FAILED);
     tilingData_.outputFinalState = *attrs->GetAttrPointer<bool>(ATTR_OUTPUT_FINAL_STATE_INDEX) ? 1 : 0;
     tilingData_.inplaceFinalState = *attrs->GetAttrPointer<bool>(ATTR_INPLACE_FINAL_STATE_INDEX) ? 1 : 0;
     tilingData_.useQkL2norm = *attrs->GetAttrPointer<bool>(ATTR_USE_QK_L2NORM_INDEX) ? 1 : 0;

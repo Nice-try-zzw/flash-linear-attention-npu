@@ -498,7 +498,9 @@ __simd_vf__ inline void RecurrentKdaTokenVf(__ubuf__ State *target, __ubuf__ Sta
         Exp(beta, beta, mask);
         Adds(beta, beta, 1.0f, mask);
         Div(beta, one, beta, mask);
-        if (negative) Muls(beta, beta, 2.0f, mask);
+        if (negative) {
+            Muls(beta, beta, 2.0f, mask);
+        }
     }
     if (rawGate) {
         Duplicate(expA, aLog, mask);
@@ -564,7 +566,9 @@ public:
 
     __aicore__ inline void Process()
     {
-        if (!ValidateSequences()) return;
+        if (!ValidateSequences()) {
+            return;
+        }
         const uint64_t taskCount = uint64_t(tiling_->b) * tiling_->nv;
         uint32_t currentBank = 0;
         uint32_t tileIndex = 0;
@@ -578,8 +582,12 @@ public:
             UpdateSequence(request);
             // 空请求不产生输出，跳过即可；元数据越界（slot 超出 state 池）说明入参
             // 非法，本核后续任务同属一份元数据，直接结束整个循环。
-            if (sequenceBegin_ == sequenceEnd_) continue;
-            if (!ValidateSlots(request)) break;
+            if (sequenceBegin_ == sequenceEnd_) {
+                continue;
+            }
+            if (!ValidateSlots(request)) {
+                break;
+            }
             const uint64_t initialSlot = InitialSlot(request);
             const uint64_t keyHead = head / (tiling_->nv / tiling_->nk);
             const int64_t taskTokens = sequenceEnd_ - sequenceBegin_;
@@ -607,7 +615,9 @@ public:
                 SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
                 stateReadyEvent = true;
             }
-            if (usesBias) Mutex::Lock<PIPE_V>(PARAMETER_MUTEX[parameterBuffer]);
+            if (usesBias) {
+                Mutex::Lock<PIPE_V>(PARAMETER_MUTEX[parameterBuffer]);
+            }
             // 等待本任务初态搬入完成后再启动第一个 token 的 VF。
             WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
             for (int64_t start = sequenceBegin_; start < sequenceEnd_; start += TOKEN_TILE) {
@@ -699,9 +709,13 @@ private:
 
     __aicore__ inline bool ValidateSequences() const
     {
-        if (!tiling_->hasCuSeqlens) return true;
+        if (!tiling_->hasCuSeqlens) {
+            return true;
+        }
         int64_t previous = Metadata(cuAddress_, tiling_->cuSeqlensDtype, 0);
-        if (previous != 0) return false;
+        if (previous != 0) {
+            return false;
+        }
         for (uint32_t request = 0; request < tiling_->b; ++request) {
             const int64_t end = Metadata(cuAddress_, tiling_->cuSeqlensDtype, request + 1);
             if (end < previous || uint64_t(end) > tiling_->t ||
@@ -716,7 +730,9 @@ private:
 
     __aicore__ inline void UpdateSequence(uint64_t request)
     {
-        if (cachedRequest_ == request) return;
+        if (cachedRequest_ == request) {
+            return;
+        }
         cachedRequest_ = request;
         sequenceBegin_ = tiling_->hasCuSeqlens ?
             Metadata(cuAddress_, tiling_->cuSeqlensDtype, request) :
@@ -728,7 +744,9 @@ private:
 
     __aicore__ inline uint64_t StateSlot(uint64_t request, int64_t token) const
     {
-        if (!tiling_->hasSsmStateIndices) return request;
+        if (!tiling_->hasSsmStateIndices) {
+            return request;
+        }
         const uint64_t offset = tiling_->ssmStateStride ?
             request * tiling_->ssmStateStride + token - sequenceBegin_ : token;
         return uint64_t(Metadata(indicesAddress_, tiling_->ssmStateIndicesDtype, offset));
@@ -743,13 +761,21 @@ private:
             // accepted 前綴从该窗口中挑选初态，因此上界取 max_step。
             const uint64_t acceptedLimit = tiling_->ssmStateStride != 0 ?
                 static_cast<uint64_t>(tiling_->ssmStateStride) : static_cast<uint64_t>(sequenceLength);
-            if (accepted < 1 || static_cast<uint64_t>(accepted) > acceptedLimit) return false;
+            if (accepted < 1 || static_cast<uint64_t>(accepted) > acceptedLimit) {
+                return false;
+            }
             const int64_t initialToken = sequenceBegin_ + accepted - 1;
-            if (StateSlot(request, initialToken) >= tiling_->sBlockNum) return false;
+            if (StateSlot(request, initialToken) >= tiling_->sBlockNum) {
+                return false;
+            }
         }
-        if (!tiling_->hasSsmStateIndices) return request < tiling_->sBlockNum;
+        if (!tiling_->hasSsmStateIndices) {
+            return request < tiling_->sBlockNum;
+        }
         for (int64_t token = sequenceBegin_; token < sequenceEnd_; ++token) {
-            if (StateSlot(request, token) >= tiling_->sBlockNum) return false;
+            if (StateSlot(request, token) >= tiling_->sBlockNum) {
+                return false;
+            }
         }
         return true;
     }
@@ -845,17 +871,24 @@ private:
     }
 
     const RecurrentKdaTilingData *tiling_;
-    GlobalTensor<bfloat16_t> queryGm_, keyGm_, valueGm_, outputGm_;
-    GlobalTensor<State> stateGm_, stateOutGm_;
+    GlobalTensor<bfloat16_t> queryGm_;
+    GlobalTensor<bfloat16_t> keyGm_;
+    GlobalTensor<bfloat16_t> valueGm_;
+    GlobalTensor<bfloat16_t> outputGm_;
+    GlobalTensor<State> stateGm_;
+    GlobalTensor<State> stateOutGm_;
     GlobalTensor<Gate> gateGm_;
     GlobalTensor<Beta> betaGm_;
-    GlobalTensor<float> aLogGm_, biasGm_;
+    GlobalTensor<float> aLogGm_;
+    GlobalTensor<float> biasGm_;
     GM_ADDR cuAddress_;
     GM_ADDR indicesAddress_;
     GM_ADDR acceptedAddress_;
     LocalTensor<State> stateBanks_[MAX_STATE_BANKS];
-    LocalTensor<bfloat16_t> queryTile_[INPUT_BUFFERS], keyTile_[INPUT_BUFFERS];
-    LocalTensor<bfloat16_t> valueTile_[INPUT_BUFFERS], outputTile_[INPUT_BUFFERS];
+    LocalTensor<bfloat16_t> queryTile_[INPUT_BUFFERS];
+    LocalTensor<bfloat16_t> keyTile_[INPUT_BUFFERS];
+    LocalTensor<bfloat16_t> valueTile_[INPUT_BUFFERS];
+    LocalTensor<bfloat16_t> outputTile_[INPUT_BUFFERS];
     LocalTensor<Gate> gateTile_[INPUT_BUFFERS];
     LocalTensor<Beta> betaTile_[INPUT_BUFFERS];
     LocalTensor<float> biasUb_[PARAMETER_BUFFERS];
