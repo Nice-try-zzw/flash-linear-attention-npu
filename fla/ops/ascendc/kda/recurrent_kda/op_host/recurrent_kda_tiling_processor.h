@@ -737,8 +737,12 @@ private:
     int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
         const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
-        const int64_t rawBufferNum = ctx_.isA5 != 0 ? 1 : 2;
-        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
+        // A5(arch35) 与 A6(arch92 legacy) 都是 BUFFER_NUM=1，只有 A2/A3 generic 走双槽 packedInput。
+        const int64_t rawBufferNum = (ctx_.isA5 != 0 || ctx_.isA6 != 0) ? 1 : 2;
+        // A2/A3 generic 的 beta 队列长度随 nv 伸缩；A5(arch35) 按 aNv 对齐；
+        // A6(arch92 legacy) 的 betaUbSize = MAX_MTP * BF16_NUM_PER_BLOCK = 8*16，与 nv 无关。
+        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv :
+            (ctx_.isA6 != 0 ? static_cast<int64_t>(RKDA_MAX_MTP) * 16 : static_cast<int64_t>(nv));
         int64_t usedUbBytes = rawBufferNum * rawBytes;
         usedUbBytes += RKDA_MAX_MTP * 4 * betaHeads;
         usedUbBytes += 64 + RKDA_UB_GUARD_BYTES;
@@ -747,7 +751,8 @@ private:
 
     int64_t CalcWorkingUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
-        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
+        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv :
+            (ctx_.isA6 != 0 ? static_cast<int64_t>(RKDA_MAX_MTP) * 16 : static_cast<int64_t>(nv));
         int64_t usedUbBytes = CalcFixedUbBytes(aNv, aDv, aDk, nv);
         usedUbBytes += RKDA_MAX_MTP * (4 * aDv + 12 * aDk + 4 * betaHeads);
         return usedUbBytes;
