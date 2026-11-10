@@ -266,43 +266,39 @@ public:
         pipe_->InitBuffer(scalarBuf_, 64);
 
         uint32_t buffOffset = 0;
+        // 共享工作区（不随 slot 切换）：delta/attn/state/gateBias 跨窗口原地续接或复用。
         deltaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
         buffOffset += singleVSize;
         attnInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
         buffOffset += singleVSize;
-        // ping-pong 双槽输入缓冲：slot 0 先分配，slot 1 紧接其后。
-        vInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
-        buffOffset += vSize * BUFFER_NUM;
-        qInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize * BUFFER_NUM;
-        kInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize * BUFFER_NUM;
         stateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
         buffOffset += cubeSize;
-        // dt_bias 独立占一份缓冲：窗口递推后 QKV/gate 的搬入发生在 state 装载之后，
-        // 不能再与 state 工作区复用。这 4*aDk 落在 host 为 broadTmp 预留的 4*aDk*vStep 内。
         gateBiasInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_), buffOffset);
         buffOffset += static_cast<uint32_t>(alignK_ * sizeof(float));
-        betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
-        buffOffset += betaUbSize * BUFFER_NUM;
-        gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize * BUFFER_NUM;
 
-        // slot 1 起点 = slot 0 起点 + 单槽容量。
-        qInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_),
-            static_cast<uint32_t>(vSize * BUFFER_NUM + kSize + kSize));
-        kInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_),
-            static_cast<uint32_t>(vSize * BUFFER_NUM + kSize * BUFFER_NUM + kSize + kSize));
-        vInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_),
-            vSize + vSize);
-        betaInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)),
-            static_cast<uint32_t>(singleVSize * 2 + vSize * BUFFER_NUM + kSize * BUFFER_NUM * 2 +
-                                  cubeSize + static_cast<uint32_t>(alignK_ * sizeof(float)) +
-                                  betaUbSize + betaUbSize));
-        gateInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_),
-            static_cast<uint32_t>(singleVSize * 2 + vSize * BUFFER_NUM + kSize * BUFFER_NUM * 2 +
-                                  cubeSize + static_cast<uint32_t>(alignK_ * sizeof(float)) +
-                                  betaUbSize * BUFFER_NUM + kSize));
+        // ===== 输入 ping-pong 双槽：slot 0 =====
+        vInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
+        buffOffset += vSize;
+        qInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+        kInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+        betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
+        buffOffset += betaUbSize;
+        gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+
+        // ===== 输入 ping-pong 双槽：slot 1（紧接 slot 0 之后，buffOffset 自然推进，绝无地址重叠） =====
+        vInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
+        buffOffset += vSize;
+        qInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+        kInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
+        betaInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
+        buffOffset += betaUbSize;
+        gateInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize;
     }
 
     __aicore__ inline void SyncMte2ToV()
