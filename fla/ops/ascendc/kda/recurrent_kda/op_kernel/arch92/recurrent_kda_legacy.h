@@ -1392,41 +1392,23 @@ private:
             bool hasPendingAttn = false;
             bool hasPendingState = false;
             // 段长超过输入窗口时按窗口顺序递推：state 在同一个 v-tile 内跨窗口原地续接，
-            // 只有 Q/K/V/gate/beta 的窗口缓冲被重新搬入。双槽 ping-pong：slot 0 与 slot 1
-            // 在窗口间交替，MTE2 搬 W+1 与 VF Compute W 真流水重叠。
+            // 只有 Q/K/V/gate/beta 的窗口缓冲被重新搬入。双槽 ping-pong + lookahead：
             //
-            // 流水线时序（假设 3 个窗口）:
-            //   W0: Start+End+Compute（同步完整搬入）
-            //        ↓ 对 W1 异步 Start
-            //   W1: End（等 MTE2） → Compute（此时 MTE2 可能已经在搬 W2）
-            //        ↓ 对 W2 异步 Start
-            //   W2: End → Compute
+            //   Start(W0)                     // 预发起，MTE2 后台搬 W0
+            //   while:
+            //     End(W_cur) + Compute(W_cur) // VF 消费 W_cur（W0 End 同步等，之后 MTE2 W+1 被掩盖）
+            //     Start(W_next)                // MTE2 搬 W+1，与 VF Compute(W_cur) 真流水重叠
             //
-            // 这样 MTE2 latency 完全被 VF Compute latency 掩盖，只有 W0 是完整同步的。
+            // 这样只有 W0 的 DeQue 是完整同步等 MTE2 完成的，后续所有窗口的 MTE2 latency
+            // 都被上一个窗口的 VF Compute latency 完全掩盖。
             int64_t windowStart = seq0;
             uint32_t slot = 0;
-            const int64_t totalLen = seq1 - seq0;
 
-            // ===== W0: 完整同步搬入 =====
+            // ===== 预发起 W0（Start：异步 EnQue，不阻塞 VF）=====
             if (windowStart < seq1) {
-                const int32_t win0Len = static_cast<int32_t>(
-                    totalLen < static_cast<int64_t>(MAX_MTP) ? totalLen : static_cast<int64_t>(MAX_MTP));
-                const int64_t win0End = windowStart + win0Len;
+                const int64_t win0End = windowStart + MAX_MTP < seq1 ? windowStart + MAX_MTP : seq1;
                 CopyInBetaStart(windowStart, win0End, head_i);
-                CopyInBetaEnd(win0End, windowStart, slot);
-                CopyInQKVGateStart(windowStart, win0Len, head_i);
-                CopyInQKVGateEnd(win0Len, head_i, slot);
-
-                // ===== 对 W1 异步发起 MTE2（不阻塞 VF）=====
-                windowStart = win0End;
-                slot ^= 1;
-                if (windowStart < seq1) {
-                    const int64_t nextLen = windowStart + MAX_MTP < seq1
-                                               ? static_cast<int64_t>(MAX_MTP)
-                                               : seq1 - windowStart;
-                    CopyInBetaStart(windowStart, windowStart + nextLen, head_i);
-                    CopyInQKVGateStart(windowStart, static_cast<int32_t>(nextLen), head_i);
-                }
+                CopyInQKVGateStart(windowStart, static_cast<int32_t>(win0End - windowStart), head_i);
             }
 
             while (windowStart < seq1) {
@@ -1435,11 +1417,13 @@ private:
                     remaining < static_cast<int64_t>(MAX_MTP) ? remaining : static_cast<int64_t>(MAX_MTP));
                 const int64_t windowEnd = windowStart + windowLen;
 
-                // ===== End: DeQue 阻塞等 MTE2 + VF Unpack 到 slot UB + PipeBarrier =====
-                // 这里 MTE2 数据在 W0 的 VF Compute 期间已经搬了一段时间，DeQue 等待被掩盖。
+                // ===== End W_cur: DeQue 阻塞等 MTE2 + VF Unpack 到 slot UB + PipeBarrier =====
+                // W0 的 MTE2 latency 无法掩盖（第一次）；W1~WN 的 MTE2 已经在 W_prev 的 Compute
+                // 期间后台搬了一段时间，DeQue 等待被掩盖。
                 CopyInBetaEnd(windowEnd, windowStart, slot);
                 CopyInQKVGateEnd(windowLen, head_i, slot);
 
+                // ===== Compute W_cur =====
                 for (int64_t seq_i = windowStart; seq_i < windowEnd; seq_i++) {
                     const uint64_t localIdx = static_cast<uint64_t>(seq_i - windowStart);
                     uint64_t betaOffset = localIdx;
@@ -1471,15 +1455,13 @@ private:
                     }
                 }
 
-                // ===== 对 W+1 异步发起 MTE2 =====
+                // ===== 对 W_next 异步 Start（ping-pong 切到另一槽）=====
                 windowStart = windowEnd;
                 slot ^= 1;
                 if (windowStart < seq1) {
-                    const int64_t nextLen = windowStart + MAX_MTP < seq1
-                                               ? static_cast<int64_t>(MAX_MTP)
-                                               : seq1 - windowStart;
-                    CopyInBetaStart(windowStart, windowStart + nextLen, head_i);
-                    CopyInQKVGateStart(windowStart, static_cast<int32_t>(nextLen), head_i);
+                    const int64_t nextEnd = windowStart + MAX_MTP < seq1 ? windowStart + MAX_MTP : seq1;
+                    CopyInBetaStart(windowStart, nextEnd, head_i);
+                    CopyInQKVGateStart(windowStart, static_cast<int32_t>(nextEnd - windowStart), head_i);
                 }
             }
             if (hasPendingAttn) {
