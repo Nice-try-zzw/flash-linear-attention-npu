@@ -624,7 +624,9 @@ def npu_recurrent_kda(
                 "initial_state (no shape to build the scratch from)")
         import torch
 
-        scratch = torch.empty_like(initial_state)
+        # Preserve the caller's initial values without exposing its storage to
+        # the in-place launcher. As with empty_like, scratch is not a grad state.
+        scratch = initial_state.detach().clone(memory_format=torch.preserve_format)
         out, _ = npu_recurrent_kda(
             q, k, v, g, beta, scratch, cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices, A_log=A_log, dt_bias=dt_bias,

@@ -46,13 +46,21 @@ static constexpr size_t RKDA_DIM_3 = 3;
 
 static constexpr uint32_t RKDA_LAYOUT_BSND = 0;
 static constexpr uint32_t RKDA_LAYOUT_TND = 1;
-// A2/A3 input window capacity; A5 retains its sequence-length limit.
+// A2/A3 与 A6 兼容实现的输入窗口容量（段长可越过窗口，按窗口顺序递推）；
+// A5 沿用该值作为每段序列长度上限。
 static constexpr size_t RKDA_MAX_MTP = 8;
 static constexpr int64_t RKDA_INPUT_BUFFER_NUM = 2;
 static constexpr int64_t RKDA_UB_GUARD_BYTES = 2048;
 static constexpr size_t RKDA_SYS_WORKSPACE_SIZE = 16U * 1024U * 1024U;
 // On A5, broadTmp aliases state in UB when K hits this fused-reduce size.
 static constexpr int64_t RKDA_FUSED_REDUCE_K = 128;
+// A6(DAV_9201) 静态 UB 引擎的布局常量定义在 op_kernel/recurrent_kda_struct.h，
+// host 与 kernel 共用同一份，避免各自维护。
+using RecurrentKda::RKDA_A6_BF16_STATE_BANKS;
+using RecurrentKda::RKDA_A6_DIM;
+using RecurrentKda::RKDA_A6_FP32_STATE_BANKS;
+using RecurrentKda::RKDA_A6_INPUT_BUFFERS;
+using RecurrentKda::RKDA_A6_TOKEN_TILE;
 
 struct RecurrentKdaTilingContext {
     const char *nodeName = "RecurrentKda";
@@ -102,6 +110,8 @@ struct RecurrentKdaTilingContext {
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
     uint32_t isA5 = 0;
+    // A6(ascend960dt, DAV_9201)：V=128 走 arch92 静态 UB 引擎，UB 预算按平台实际值复核。
+    uint32_t isA6 = 0;
 };
 
 class RecurrentKdaTilingProcessor {
@@ -132,6 +142,10 @@ public:
 
     ge::graphStatus ProcessUb(RecurrentKdaTilingData &tiling) const
     {
+        if (ctx_.isA6 != 0 && tiling.dv == 128) {
+            // A6 的 V=128 由 arch92 静态 UB 引擎接管，UB 布局与 buffer 数在编译期确定。
+            return PlanA6Ub(tiling);
+        }
         struct RuleItem {
             const char *name;
             ge::graphStatus (RecurrentKdaTilingProcessor::*fn)(RecurrentKdaTilingData &, UbCalcContext &) const;
@@ -172,6 +186,38 @@ private:
     };
 
     RecurrentKdaTilingContext ctx_;
+
+    // arch92 引擎的静态 UB 用量与 kernel 共用 RkdaA6UbBytes，任一侧改常量都会
+    // 在 kernel 的 static_assert 处编译失败。
+    int64_t A6StateBanks() const
+    {
+        return (ctx_.stateDtype == ge::DT_FLOAT) ? RKDA_A6_FP32_STATE_BANKS : RKDA_A6_BF16_STATE_BANKS;
+    }
+
+    int64_t CalcA6UbBytes() const
+    {
+        const int64_t stateBytes = (ctx_.stateDtype == ge::DT_FLOAT) ? 4 : 2;
+        return RecurrentKda::RkdaA6UbBytes(A6StateBanks(), RKDA_A6_TOKEN_TILE, stateBytes);
+    }
+
+    ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
+    {
+        const int64_t ubSize = static_cast<int64_t>(ctx_.ubSize);
+        // 静态布局之外再留出一段余量，避免与框架占用的尾部空间重叠。
+        const int64_t usedBytes = CalcA6UbBytes() + RKDA_UB_GUARD_BYTES;
+        OP_CHECK_IF(usedBytes > ubSize,
+                    OP_LOGE(ctx_.nodeName, "A6 static UB needs %ld bytes but only %ld are available.",
+                            usedBytes, ubSize),
+                    return ge::GRAPH_FAILED);
+        tiling.ubCalSize = static_cast<uint32_t>(ctx_.ubSize);
+        tiling.ubRestBytes = static_cast<uint32_t>(ubSize - usedBytes);
+        // arch92 引擎在编译期自行布局并一次处理完整 V，以下字段只用于保持与兼容路径
+        // 相同的 tiling 语义，引擎不读取。
+        tiling.vStep = static_cast<uint32_t>(RKDA_A6_DIM);
+        tiling.stateOutBufferNum = static_cast<uint32_t>(A6StateBanks());
+        tiling.attnOutBufferNum = static_cast<uint32_t>(RKDA_A6_INPUT_BUFFERS);
+        return ge::GRAPH_SUCCESS;
+    }
 
     std::array<int64_t, RKDA_STATE_DIM_NUM> ResolveStateStrides(bool output) const
     {
@@ -496,6 +542,9 @@ private:
                     OP_LOGE(ctx_.nodeName, "HV must be an integer multiple of H, but HV is %ld and H is %ld.",
                             hvNum, hNum),
                     return ge::GRAPH_FAILED);
+        // A6 只有 V=128 走静态 UB 引擎；V 取其它值时回落到按 RKDA_MAX_MTP 个 token
+        // 分配输入缓冲的兼容实现。兼容实现按窗口顺序递推，段长超过窗口也不影响语义，
+        // 因此这里不对 varlen/dense 的段长做任何拦截。
         if (!CheckDim(stateShape, RKDA_STATE_DIM_NUM, "initial_state")) {
             return ge::GRAPH_FAILED;
         }
@@ -562,6 +611,17 @@ private:
         tiling.keyHeadStride = static_cast<uint64_t>(keyStrides[headDim]);
         tiling.valueTokenStride = static_cast<uint64_t>(valueStrides[tokenDim]);
         tiling.valueHeadStride = static_cast<uint64_t>(valueStrides[headDim]);
+        // BSND 每个 batch 的首地址跨度；TND 只有一条序列，A6 引擎按 token 线性寻址。
+        const size_t batchDim = RKDA_DIM_0;
+        tiling.queryBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
+            static_cast<uint64_t>(tiling.seqLen) * tiling.queryTokenStride :
+            static_cast<uint64_t>(queryStrides[batchDim]);
+        tiling.keyBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
+            static_cast<uint64_t>(tiling.seqLen) * tiling.keyTokenStride :
+            static_cast<uint64_t>(keyStrides[batchDim]);
+        tiling.valueBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
+            static_cast<uint64_t>(tiling.seqLen) * tiling.valueTokenStride :
+            static_cast<uint64_t>(valueStrides[batchDim]);
         const auto stateInStrides = ResolveStateStrides(false);
         const auto stateOutStrides = ResolveStateStrides(true);
         tiling.stateInStride0 = static_cast<uint64_t>(stateInStrides[RKDA_DIM_0]);
@@ -625,7 +685,7 @@ private:
         uint64_t maxCoreNum = (ctx_.aivNum > 0) ? ctx_.aivNum : 1;
         uint64_t selectedCoreNum = (taskUnits < maxCoreNum) ? taskUnits : maxCoreNum;
         if (ctx_.isA5 == 0) {
-            // Keep the minimum wave count while avoiding partially filled cores.
+            // 在避免部分核闲置的前提下，保持最少 wave 数。
             const uint64_t tasksPerCore = (taskUnits + maxCoreNum - 1) / maxCoreNum;
             selectedCoreNum = (taskUnits + tasksPerCore - 1) / tasksPerCore;
         }
@@ -677,8 +737,12 @@ private:
     int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
         const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
-        const int64_t rawBufferNum = ctx_.isA5 != 0 ? 1 : 2;
-        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
+        // A5(arch35) 与 A6(arch92 legacy) 都是 BUFFER_NUM=1，只有 A2/A3 generic 走双槽 packedInput。
+        const int64_t rawBufferNum = (ctx_.isA5 != 0 || ctx_.isA6 != 0) ? 1 : 2;
+        // A2/A3 generic 的 beta 队列长度随 nv 伸缩；A5(arch35) 按 aNv 对齐；
+        // A6(arch92 legacy) 的 betaUbSize = MAX_MTP * BF16_NUM_PER_BLOCK = 8*16，与 nv 无关。
+        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv :
+            (ctx_.isA6 != 0 ? static_cast<int64_t>(RKDA_MAX_MTP) * 16 : static_cast<int64_t>(nv));
         int64_t usedUbBytes = rawBufferNum * rawBytes;
         usedUbBytes += RKDA_MAX_MTP * 4 * betaHeads;
         usedUbBytes += 64 + RKDA_UB_GUARD_BYTES;
@@ -687,7 +751,8 @@ private:
 
     int64_t CalcWorkingUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
-        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
+        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv :
+            (ctx_.isA6 != 0 ? static_cast<int64_t>(RKDA_MAX_MTP) * 16 : static_cast<int64_t>(nv));
         int64_t usedUbBytes = CalcFixedUbBytes(aNv, aDv, aDk, nv);
         usedUbBytes += RKDA_MAX_MTP * (4 * aDv + 12 * aDk + 4 * betaHeads);
         return usedUbBytes;
@@ -697,7 +762,9 @@ private:
     {
         int64_t coeff = 4 * aDk + 8; // state and row outputs.
         if (ctx_.isA5 == 0 || aDk != RKDA_FUSED_REDUCE_K) {
-            coeff += 4 * aDk; // broadTmp for the generic matvec path.
+            // 公共 kernel 的 broadTmp；arch92 兼容实现不使用这块预算，只从中划出
+            // 4*aDk 作为 dt_bias 暂存（见 recurrent_kda_legacy.h 的 gateBiasInUb）。
+            coeff += 4 * aDk;
         }
         return coeff;
     }
