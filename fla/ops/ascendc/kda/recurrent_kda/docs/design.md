@@ -22,7 +22,8 @@ GDN recurrent 的函数接口。
 - 不支持把 `KdaGateCumsum` 的输出流水作为公开前置步骤。
 - A2/A3 通过第 17 节的时间窗口支持长序列；保持逐 token recurrent 公式和 AIV-only 路径。A5 仍限制每段长度 <=8。
 - A6（`ascend960dt`）与 A5 保持同一功能口径，但硬件预算不同：`V=128` 走 arch92 静态 UB 引擎并支持长序列，
-  `V=256` 走 arch92 的 RegBase 兼容实现（每段不超过 8 token）。
+  `V=256` 走 arch92 的 RegBase 兼容实现，输入缓冲按 8 token 的窗口分配，段长超过窗口时按窗口顺序递推，
+  因此 dense/varlen 的每段长度都不受窗口限制，host 不对段长做前置拦截。
 
 ## 3. 能力边界
 
@@ -87,7 +88,9 @@ o_t = S @ q_t
 - `op_kernel/arch92/recurrent_kda_engine.h`：A6（`ascend960dt`）`V=128` 的静态 UB 引擎，按 tiling key 与
   `op_kernel/recurrent_kda_tiling_key.h` 的档位实例化。
 - `op_kernel/arch92/recurrent_kda_legacy.h` + `op_kernel/arch92/recurrent_kda_regbase.h`：A6 的 `V=256`
-  与未命中档位使用 A5 的兼容实现，逐元素/归约计算全部改为 RegBase，不保留 membase 向量实现。
+  与未命中档位在 A5 兼容实现的基础上改为按窗口顺序递推，逐元素/归约计算全部改为 RegBase，
+  不保留 membase 向量实现。v-tile 在外层、窗口在内层，state 在同一次 v-tile 内跨窗口原地续接；
+  代价是 `V>vStep` 时每个窗口的 Q/K/V/gate/beta 搬入与 normalize 会按 v-tile 重复一次（与 A2/A3 公共实现一致）。
 - `torch_custom/fla_npu/csrc/src/stable_recurrent_kda.cpp` + `fla_npu/ops/ascendc/_stable.py`：提供解耦的 Python 入口（Stable-ABI 适配层），不注册 legacy `torch.ops.npu`；`_aclnn_ctypes.py` 保留为参考实现与回退。
 - legacy `torch.ops.npu.npu_recurrent_kda` 不属于当前支持范围，不作为公共接口维护。
 
@@ -98,7 +101,7 @@ o_t = S @ q_t
 Tiling 按逻辑序列和 value head 拆分任务。提供 `cu_seqlens` 时，`seq_num=len(cu_seqlens)-1`，使用与
 fla-org 一致的累计边界语义，第 `i` 条序列范围为 `[cu_seqlens[i], cu_seqlens[i+1])`；未提供时，
 BSND 按 batch 行划分序列，TND 视为一条序列。接口面向 decode / MTP 短序列：每个相邻 offset
-的差值表示 varlen 每段长度；A2/A3 不再限制为 8，A5 每段与 dense 单序列仍须 <=8。提供 cu_seqlens 时，末项表示有效 token 数，可小于图捕获的
+的差值表示 varlen 每段长度；A2/A3 与 A6 不再限制为 8（内部按 8 token 窗口递推），A5 每段与 dense 单序列仍须 <=8。提供 cu_seqlens 时，末项表示有效 token 数，可小于图捕获的
 token capacity。
 
 ### 6.2 Tiling Data
@@ -168,6 +171,8 @@ normalize + raw gate + dt_bias + beta sigmoid 且无负特征值 / 无 safe gate
 - 相邻 offset 相等时表示空序列；该序列不产生 token 输出，也不读取 `ssm_state_indices/num_accepted_tokens` 或 state。
 - 末项小于 capacity 时，仅 `[0,cu_seqlens[-1])` 的有效输出和 state side effect 有定义；padding tail 输出不作保证。
 - 一维 `ssm_state_indices` 按 packed token 偏移读取；二维索引按 `[seq_idx,step]` 读取，第二维必须覆盖对应序列长度。
+- 以上值约束由 device kernel 校验：`cu_seqlens` 结构性非法（首项非 0、非单调、超过 capacity）时该核不产出输出；
+  单条序列的二维 `ssm_state_indices` 步数不足该段长度时只跳过该序列，其余序列照常计算。
 - `num_accepted_tokens` 只在提供 `ssm_state_indices` 时有效，用于定位 MTP decode 的初始状态槽。
 
 ## 8. 平台设计
@@ -177,7 +182,7 @@ normalize + raw gate + dt_bias + beta sigmoid 且无负特征值 / 无 safe gate
 | A2 | `ascend910b` | 公共 AIV kernel | 无 |
 | A3 | `ascend910_93` | 公共 AIV kernel | 无 |
 | A5 | `ascend950` | arch35 特化 AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
-| A6 | `ascend960dt` | arch92 特化 AIV kernel | `V=128` 静态 UB 引擎（State bank：BF16 4 份 / FP32 3 份、32 token/tile、资源 Mutex）；`V=256` 走 arch92 RegBase 兼容实现，host 对 dense 布局拒绝每段超过 8 token |
+| A6 | `ascend960dt` | arch92 特化 AIV kernel | `V=128` 静态 UB 引擎（State bank：BF16 4 份 / FP32 3 份、32 token/tile、资源 Mutex）；`V=256` 走 arch92 RegBase 兼容实现（8 token 输入窗口，越窗顺序递推，段长不限） |
 
 ## 9. 精度设计
 
@@ -189,10 +194,14 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 当前实现已使用输入/输出双缓冲，并在 arch35 的 `K=128` 路径采用融合归约和 repeat DataCopy；后续优化仍应以
 状态搬运、向量流水和同步开销为重点。
 A6 的 `V=128` 路径复用同一套逐 token VF，但按 384 KiB 向量 UB 把 tile 扩到 32 token 以摊薄 tile 级
-DMA 与 Mutex 开销（FP32 State 3 bank 布局共 298 496 B，另留 2 KiB 余量）；State bank 数按 dtype
-取 BF16 4 份 / FP32 3 份，并用 host 读到的真实 UB 预算做容量复核。
+DMA 与 Mutex 开销（FP32 State 3 bank 布局共 299 008 B，另留 2 KiB 余量）；State bank 数按 dtype
+取 BF16 4 份 / FP32 3 份，并用 host 读到的真实 UB 预算做容量复核。布局常量与字节公式定义在
+`op_kernel/recurrent_kda_struct.h`，host 与 kernel 共用同一份，kernel 侧再用 `static_assert`
+对齐两侧账本。
 V-first 热循环按四行展开：A6 向量单元每个发射槽为一长两短，四行之间没有依赖，归约长指令
-（`ReduceSum`）发射时另一组的乘加/转换/搬出短指令可填入其余发射槽。
+（`ReduceSum`）发射时另一组的乘加/转换/搬出短指令可填入其余发射槽。逐行归约结果先以 FP32
+连续落到 UB staging，再由两条向量 `Cast` 写回 bf16 输出，把每 token 128 条单元素 `Cast`
+降为两条（舍入仍为 `CAST_RINT`，数值等价）。
 初态搬入（MTE2）与首个 token 的 VF 读之间没有共享 Mutex（V 侧只锁下一个 bank），引擎显式用
 `SetFlag<HardEvent::MTE2_V>` / `WaitFlag` 建立 RAW 依赖；state 的搬入/搬出一律走 `DataCopyPad`，
 因为 host 只校验 state stride 的形状与不重叠，不保证 GM 基址 32 B 对齐。
@@ -230,7 +239,7 @@ A2/A5 精度验证过程中修复以下问题：
   batch 维可按 `T * tokenStride` 扁平化。已验证的 feature-gap、zero-stride、batch-gap view
   自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
 - 当前 `K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
-- A2/A3 内部时间窗口容量为 8，支持多窗口序列；A5 每段仍限制为 <=8。
+- A2/A3 与 A6 的内部时间窗口容量为 8，支持多窗口序列；A5 每段仍限制为 <=8。
 - state 最后两维必须为行主序稠密矩阵；slot/head 维可有间隔但不得重叠。
 - 显式 slot 模式要求所有活跃序列的写槽互不冲突，且 slot 值位于 state pool 容量范围内。
 - 后续若扩展长序列或更多 dtype，需要同步更新 op_host 校验、tiling、kernel、本地测试 case 和 API 文档。

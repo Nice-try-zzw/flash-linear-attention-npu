@@ -46,9 +46,10 @@
 | bank 数与预取握手 | 同上（`StateBanks` / `Process`） | 已实现，待实测 |
 | 初态搬入 RAW 依赖 | 同上（`Process` 的 `SetFlag<HardEvent::MTE2_V>`） | 已实现，待实测 |
 | state 非对齐搬入/搬出 | 同上（`CopyStateIn` / `CopyStateOut` 统一 `DataCopyPad`） | 已实现，待实测 |
-| 静态 UB 账本 | 同上（`UbBytes`）+ `op_host/recurrent_kda_tiling_processor.h`（`PlanA6Ub`） | 已实现，待实测 |
+| 静态 UB 账本 | `op_kernel/recurrent_kda_struct.h`（`RkdaA6UbBytes`，host/kernel 共用） | 已实现，待实测 |
 | V-first 四行展开 | 同上（`RecurrentKdaVFirstTwoPass` / `RecurrentKdaVFirstUpdateRows`） | 已实现，待实测 |
-| V=256 每段 <=8 的 host 拦截 | `op_host/recurrent_kda_tiling_processor.h`（`CheckShapeDimAndRelation`） | 已实现，待实测 |
+| V-first out 的 FP32 staging | 同上（`outputScratchUb_` + 两条 `Cast`） | 已实现，待实测 |
+| V=256 的 8-token 窗口递推 | `op_kernel/arch92/recurrent_kda_legacy.h`（`ProcessHead` 窗口循环 + `CopyInQKVGate` 按窗搬入） | 已实现，待实测 |
 | tiling key 选择 | `op_host/recurrent_kda_tiling.cpp`（`DoLibApiTiling`） | 已实现，待实测 |
 | batch stride 填充 | `op_host/recurrent_kda_tiling_processor.h`（`FillTilingShapeData`） | 已实现，待实测 |
 | A6 SOC/CMake 配置 | `op_host/recurrent_kda_def.cpp`、`op_host/CMakeLists.txt` | 已实现，待编译 |
@@ -64,6 +65,6 @@
 
 | 风险 | 影响 | 回退 |
 | --- | --- | --- |
-| A6 实际 UB 小于 300 544 B（FP32 3 bank + 2 KiB 余量） | `PlanA6Ub` 返回失败，算子不可用 | 降低 `TOKEN_TILE`（32→16）并同步 `RKDA_A6_TOKEN_TILE` 后重新核算 |
-| A6 工具链不支持静态 `LocalTensor` 构造或 14 参数 VF | 编译失败 | `V=128` 临时全部走 arch92 RegBase legacy（功能可用、性能退化） |
+| A6 实际 UB 小于 301 056 B（FP32 3 bank + 2 KiB 余量） | `PlanA6Ub` 返回失败，算子不可用 | 降低 `TOKEN_TILE`（32→16）并同步 `RKDA_A6_TOKEN_TILE` 后重新核算 |
+| A6 工具链不支持静态 `LocalTensor` 构造或参数较多的 VF | 编译失败 | `V=128` 临时全部走 arch92 RegBase legacy（功能可用、性能退化） |
 | A6 性能未达预期 | 收益不足 | `TOKEN_TILE` / bank 数为编译期常量，可单独实验 |

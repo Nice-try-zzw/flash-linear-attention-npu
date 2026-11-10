@@ -39,7 +39,8 @@ recurrent_kda(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR gate, GM_ADDR b
     GM_ADDR stateOutput = tilingData.inplaceFinalState == 1 ? initialStateOut : finalState;
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 9201
     if constexpr (KERNEL_MODE == RKDA_TPL_COMPAT) {
-        // V=256 与未命中静态 UB 引擎的组合沿用 A5 的 RegBase 兼容实现（每段 <=8 token）。
+        // V!=128 与未命中静态 UB 引擎的组合走 arch92 RegBase 兼容实现：
+        // 输入缓冲按 8 token 窗口分配，段长超出窗口时按窗口顺序递推。
         TPipe pipe;
         RKDALegacyInitParams legacy{query, key, value, gate, beta, initialState, cuSeqlens, ssmStateIndices,
                                     aLog, dtBias, numAcceptedTokens, out, stateOutput};

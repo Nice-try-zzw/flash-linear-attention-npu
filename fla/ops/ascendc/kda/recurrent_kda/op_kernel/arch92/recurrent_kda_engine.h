@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -33,24 +33,30 @@ using namespace AscendC;
 using namespace AscendC::MicroAPI;
 using RecurrentKda::RecurrentKdaTilingData;
 
-constexpr uint32_t DIM = 128;
+// 布局常量与 host tiling 共用 recurrent_kda_struct.h 中的定义，单点修改。
+constexpr uint32_t DIM = static_cast<uint32_t>(RecurrentKda::RKDA_A6_DIM);
 // A6 每个 tile 的 token 上界：取 32 是为了在 384 KiB UB 内摊薄 tile 级开销，
-// 同时给 State bank 与双槽输入留出余量（FP32 布局下仍余约 90 KiB）。
-constexpr uint32_t TOKEN_TILE = 32;
+// 同时给 State bank 与双槽输入留出余量（FP32 布局下仍余约 84 KiB）。
+constexpr uint32_t TOKEN_TILE = static_cast<uint32_t>(RecurrentKda::RKDA_A6_TOKEN_TILE);
 constexpr uint32_t LAYOUT_BSND = 0;
 // FP32 bank 为 64 KiB，沿用 A5 已验证的 3 份布局；BF16 bank 为 32 KiB，
 // A6 多留一份用于跨任务初态预取。host 侧按真实 UB 预算复核。
 template <typename State>
 constexpr uint32_t StateBanks()
 {
-    return std::is_same<State, float>::value ? 3U : 4U;
+    return std::is_same<State, float>::value ?
+        static_cast<uint32_t>(RecurrentKda::RKDA_A6_FP32_STATE_BANKS) :
+        static_cast<uint32_t>(RecurrentKda::RKDA_A6_BF16_STATE_BANKS);
 }
 constexpr uint32_t MAX_STATE_BANKS = 4;
-constexpr uint32_t INPUT_BUFFERS = 2;
-constexpr uint32_t PARAMETER_BUFFERS = 2;
+constexpr uint32_t INPUT_BUFFERS = static_cast<uint32_t>(RecurrentKda::RKDA_A6_INPUT_BUFFERS);
+constexpr uint32_t PARAMETER_BUFFERS = static_cast<uint32_t>(RecurrentKda::RKDA_A6_PARAMETER_BUFFERS);
 constexpr uint32_t TILE_VECTOR_BYTES = TOKEN_TILE * DIM * sizeof(float);
 constexpr uint32_t TILE_SCALAR_BYTES = TOKEN_TILE * 32;
 constexpr uint32_t PREDICTION_BYTES = DIM * sizeof(float);
+// V-first 的逐行归约结果先以 FP32 落到 UB，再由一次向量转换写回 bf16 输出，
+// 避免 128 条单元素 Cast。
+constexpr uint32_t OUTPUT_SCRATCH_BYTES = DIM * sizeof(float);
 constexpr uint32_t PARAMETER_BYTES = DIM * sizeof(float);
 
 // 逐 token VF 的功能位：由 tiling 属性在 Init 中拼装，避免为每种
@@ -69,16 +75,28 @@ enum A6VfFlags : uint32_t {
 //   [.., +2*SLOT)                         q/k/v/gate/beta/out 双槽
 //   [.., +2*PARAMETER)                    dt_bias 双槽
 //   [.., +PREDICTION)                     VF scratch
+//   [.., +OUTPUT_SCRATCH)                 V-first out staging
 template <typename State>
 constexpr uint32_t UbBytes()
 {
     return StateBanks<State>() * DIM * DIM * static_cast<uint32_t>(sizeof(State)) +
            INPUT_BUFFERS * (4 * TOKEN_TILE * DIM * sizeof(bfloat16_t) + TILE_VECTOR_BYTES + TILE_SCALAR_BYTES) +
-           PARAMETER_BUFFERS * PARAMETER_BYTES + PREDICTION_BYTES;
+           PARAMETER_BUFFERS * PARAMETER_BYTES + PREDICTION_BYTES + OUTPUT_SCRATCH_BYTES;
 }
 
+// host 与 kernel 的账本必须逐字节一致：RkdaA6UbBytes 是 host 侧使用的同一份公式，
+// 常量或公式任一侧改动都会在这里编译失败。
+static_assert(UbBytes<float>() ==
+                  static_cast<uint32_t>(RecurrentKda::RkdaA6UbBytes(RecurrentKda::RKDA_A6_FP32_STATE_BANKS,
+                                                                   RecurrentKda::RKDA_A6_TOKEN_TILE, sizeof(float))),
+              "A6 FP32 State UB ledger diverges from the host tiling formula");
+static_assert(UbBytes<bfloat16_t>() == static_cast<uint32_t>(RecurrentKda::RkdaA6UbBytes(
+                                          RecurrentKda::RKDA_A6_BF16_STATE_BANKS,
+                                          RecurrentKda::RKDA_A6_TOKEN_TILE, sizeof(bfloat16_t))),
+              "A6 BF16 State UB ledger diverges from the host tiling formula");
+
 // 编译期只做保守校验；A6 实际 UB 由 host 读取平台信息后复核。
-// FP32 State（3 bank）占 298 496 B，BF16 State（4 bank）占 232 960 B。
+// FP32 State（3 bank）占 299 008 B，BF16 State（4 bank）占 233 472 B。
 constexpr uint32_t UB_LIMIT_BYTES = 384 * 1024;
 static_assert(UbBytes<float>() <= UB_LIMIT_BYTES, "A6 FP32 State UB exceeds the 384 KiB vector UB");
 static_assert(UbBytes<bfloat16_t>() <= UB_LIMIT_BYTES, "A6 BF16 State UB exceeds the 384 KiB vector UB");
@@ -94,6 +112,31 @@ constexpr CastTrait TO_FLOAT_ONE = {RegLayout::ONE, SatMode::SAT, MaskMergeMode:
 constexpr CastTrait TO_B16_ZERO = {RegLayout::ZERO, SatMode::NO_SAT, MaskMergeMode::MERGING, RoundMode::CAST_RINT};
 constexpr CastTrait TO_B16_ONE = {RegLayout::ONE, SatMode::NO_SAT, MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
 constexpr CastTrait TO_B16_WORD = {RegLayout::ZERO, SatMode::NO_SAT, MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
+
+// 连续 64 lane 的 bf16/fp32 载入与落盘：K-first 的 V 方向与 V-first 的 out 转换共用。
+template <typename T>
+__simd_callee__ inline void LoadContiguous(RegTensor<float> &values, __ubuf__ T *source, MaskReg &mask)
+{
+    if constexpr (std::is_same<T, float>::value) {
+        LoadAlign(values, source);
+    } else {
+        RegTensor<T> packed;
+        LoadAlign<T, LoadDist::DIST_UNPACK_B16>(packed, source);
+        Cast<float, T, TO_FLOAT_ZERO>(values, packed, mask);
+    }
+}
+
+template <typename T>
+__simd_callee__ inline void StoreContiguous(__ubuf__ T *target, RegTensor<float> &values, MaskReg &mask)
+{
+    if constexpr (std::is_same<T, float>::value) {
+        StoreAlign(target, values, mask);
+    } else {
+        RegTensor<T> packed;
+        Cast<T, float, TO_B16_WORD>(packed, values, mask);
+        StoreAlign<T, StoreDist::DIST_PACK_B32>(target, packed, mask);
+    }
+}
 
 // V-first 的两行粒度：把偶/奇 K lane 分别载入两个寄存器。
 template <typename T>
@@ -180,22 +223,21 @@ __simd_callee__ inline void StoreVFirstRows(__ubuf__ State *target, uint16_t row
 // 第二遍：逐四行重读源 bank，广播 residual，更新 State 并把 out 收集到 UB。
 // 四行一组是为了配合 A6 的一长两短三指令发射：两组两行之间没有依赖，
 // 归约长指令发射时另一组的乘法/搬出短指令可以填满其余发射槽。
+// 归约结果以 FP32 连续落到 staging，避免每行一条单元素 Cast。
 template <typename State>
 __simd_callee__ inline void RecurrentKdaVFirstUpdateRows(
-    __ubuf__ State *target, __ubuf__ State *source, __ubuf__ bfloat16_t *&outputAddress,
+    __ubuf__ State *target, __ubuf__ State *source, __ubuf__ float *outputScalar,
     __ubuf__ float *residual,
     RegTensor<float> &queryEven, RegTensor<float> &queryOdd,
     RegTensor<float> &decayEven, RegTensor<float> &decayOdd,
     RegTensor<float> &updateKeyEven, RegTensor<float> &updateKeyOdd,
-    MaskReg &mask, MaskReg &mask16, MaskReg &first,
-    UnalignRegForStore &outputStore)
+    MaskReg &mask, MaskReg &mask16, UnalignRegForStore &outputStore)
 {
     #pragma unroll 1
     for (uint16_t row = 0; row < DIM; row += 4) {
         RegTensor<float> s0, s1, s2, s3, s4, s5, s6, s7;
         RegTensor<float> residual0, residual1, residual2, residual3;
         RegTensor<float> dot0, dot1, dot2, dot3, out0, out1, out2, out3;
-        RegTensor<bfloat16_t> packedOut;
         // 四行 residual 与 State 先全部载入，后面的计算只依赖寄存器。
         LoadAlign<float, LoadDist::DIST_BRC_B32>(residual0, residual + row);
         LoadAlign<float, LoadDist::DIST_BRC_B32>(residual1, residual + row + 1);
@@ -238,26 +280,22 @@ __simd_callee__ inline void RecurrentKdaVFirstUpdateRows(
         ReduceSum(out3, dot3, mask);
         StoreVFirstRows(target, row, s0, s1, s2, s3, mask, mask16);
         StoreVFirstRows(target, row + 2, s4, s5, s6, s7, mask, mask16);
-        Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out0, first);
-        StoreUnAlign(outputAddress, packedOut, outputStore, 1);
-        Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out1, first);
-        StoreUnAlign(outputAddress, packedOut, outputStore, 1);
-        Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out2, first);
-        StoreUnAlign(outputAddress, packedOut, outputStore, 1);
-        Cast<bfloat16_t, float, TO_B16_ZERO>(packedOut, out3, first);
-        StoreUnAlign(outputAddress, packedOut, outputStore, 1);
+        StoreUnAlign(outputScalar, out0, outputStore, 1);
+        StoreUnAlign(outputScalar, out1, outputStore, 1);
+        StoreUnAlign(outputScalar, out2, outputStore, 1);
+        StoreUnAlign(outputScalar, out3, outputStore, 1);
     }
 }
 
 template <typename State>
 __simd_callee__ inline void RecurrentKdaVFirstTwoPass(
     __ubuf__ State *target, __ubuf__ State *source, __ubuf__ float *scratch,
-    __ubuf__ bfloat16_t *valueRaw, __ubuf__ bfloat16_t *output,
+    __ubuf__ float *outputScalar, __ubuf__ bfloat16_t *valueRaw, __ubuf__ bfloat16_t *output,
     RegTensor<float> &queryEven, RegTensor<float> &queryOdd,
     RegTensor<float> &keyEven, RegTensor<float> &keyOdd,
     RegTensor<float> &decayEven, RegTensor<float> &decayOdd,
     RegTensor<float> &updateKeyEven, RegTensor<float> &updateKeyOdd,
-    MaskReg &mask, MaskReg &mask16, MaskReg &first)
+    MaskReg &mask, MaskReg &mask16)
 {
     RegTensor<float> decayKeyEven, decayKeyOdd;
     Mul(decayKeyEven, decayEven, keyEven, mask);
@@ -303,38 +341,21 @@ __simd_callee__ inline void RecurrentKdaVFirstTwoPass(
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
 
     UnalignRegForStore outputStore;
-    __ubuf__ bfloat16_t *outputAddress = output;
-    RecurrentKdaVFirstUpdateRows<State>(target, source, outputAddress, scratch,
+    RecurrentKdaVFirstUpdateRows<State>(target, source, outputScalar, scratch,
         queryEven, queryOdd, decayEven, decayOdd, updateKeyEven, updateKeyOdd,
-        mask, mask16, first, outputStore);
-    StoreUnAlignPost(outputAddress, outputStore, 0);
+        mask, mask16, outputStore);
+    StoreUnAlignPost(outputScalar, outputStore, 0);
+    LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+    // 一次把 128 个 FP32 归约结果转换成 bf16 输出：与逐元素 CAST_RINT 等价，
+    // 但把每 token 128 条单元素 Cast 降成两条向量 Cast。
+    RegTensor<float> outputLow, outputHigh;
+    LoadAlign<float>(outputLow, outputScalar);
+    LoadAlign<float>(outputHigh, outputScalar + DIM / 2);
+    StoreContiguous<bfloat16_t>(output, outputLow, mask);
+    StoreContiguous<bfloat16_t>(output + DIM / 2, outputHigh, mask);
 }
 
 // K-first：lane 表示连续的 V，系数寄存器保存连续的 K，State 保持紧凑 [K,V]。
-template <typename T>
-__simd_callee__ inline void LoadContiguous(RegTensor<float> &values, __ubuf__ T *source, MaskReg &mask)
-{
-    if constexpr (std::is_same<T, float>::value) {
-        LoadAlign(values, source);
-    } else {
-        RegTensor<T> packed;
-        LoadAlign<T, LoadDist::DIST_UNPACK_B16>(packed, source);
-        Cast<float, T, TO_FLOAT_ZERO>(values, packed, mask);
-    }
-}
-
-template <typename T>
-__simd_callee__ inline void StoreContiguous(__ubuf__ T *target, RegTensor<float> &values, MaskReg &mask)
-{
-    if constexpr (std::is_same<T, float>::value) {
-        StoreAlign(target, values, mask);
-    } else {
-        RegTensor<T> packed;
-        Cast<T, float, TO_B16_WORD>(packed, values, mask);
-        StoreAlign<T, StoreDist::DIST_PACK_B32>(target, packed, mask);
-    }
-}
-
 template <typename State>
 __simd_callee__ inline void PredictKFirstHalf(RegTensor<float> &predictionLow,
                                               RegTensor<float> &predictionHigh,
@@ -430,7 +451,8 @@ __simd_vf__ inline void RecurrentKdaTokenVf(__ubuf__ State *target, __ubuf__ Sta
                                             __ubuf__ bfloat16_t *valueRaw, __ubuf__ Gate *gateRaw,
                                             __ubuf__ Beta *betaRaw, __ubuf__ float *biasRaw,
                                             __ubuf__ bfloat16_t *output, float scale, float aLog,
-                                            uint32_t flags, float lowerBound, __ubuf__ float *predictionScratch)
+                                            uint32_t flags, float lowerBound, __ubuf__ float *predictionScratch,
+                                            __ubuf__ float *outputScratch)
 {
     const bool normalize = FUSED || (flags & RKDA_VF_NORM);
     const bool rawGate = FUSED || (flags & RKDA_VF_RAW_GATE);
@@ -440,7 +462,6 @@ __simd_vf__ inline void RecurrentKdaTokenVf(__ubuf__ State *target, __ubuf__ Sta
     const bool safe = !FUSED && (flags & RKDA_VF_SAFE);
     MaskReg mask = CreateMask<float, MaskPattern::ALL>();
     MaskReg mask16 = CreateMask<half, MaskPattern::ALL>();
-    MaskReg first = CreateMask<float, MaskPattern::VL1>();
     RegTensor<float> q0, q1, k0, k1, decay0, decay1, beta, expA, work0, work1, one;
     RegTensor<float> updateKey0, updateKey1;
     if constexpr (V_FIRST) {
@@ -498,8 +519,8 @@ __simd_vf__ inline void RecurrentKdaTokenVf(__ubuf__ State *target, __ubuf__ Sta
     if constexpr (V_FIRST) {
         Mul(updateKey0, k0, beta, mask);
         Mul(updateKey1, k1, beta, mask);
-        RecurrentKdaVFirstTwoPass<State>(target, source, predictionScratch, valueRaw, output,
-            q0, q1, k0, k1, decay0, decay1, updateKey0, updateKey1, mask, mask16, first);
+        RecurrentKdaVFirstTwoPass<State>(target, source, predictionScratch, outputScratch, valueRaw, output,
+            q0, q1, k0, k1, decay0, decay1, updateKey0, updateKey1, mask, mask16);
     } else {
         RecurrentKdaKFirstTwoPass(target, source, predictionScratch, valueRaw, output,
             q0, q1, k0, k1, decay0, decay1, beta, mask);
@@ -659,6 +680,9 @@ private:
             offset += PARAMETER_BYTES;
         }
         predictionScratchUb_ = LocalTensor<float>(TPosition::VECCALC, offset, DIM);
+        offset += PREDICTION_BYTES;
+        outputScratchUb_ = LocalTensor<float>(TPosition::VECCALC, offset, DIM);
+        offset += OUTPUT_SCRATCH_BYTES;
     }
 
     __aicore__ inline int64_t Metadata(GM_ADDR address, uint32_t dtype, uint64_t element) const
@@ -806,6 +830,7 @@ private:
                                         uint32_t target, float aLog, uint32_t parameterBuffer)
     {
         __ubuf__ float *predictionScratch = (__ubuf__ float *)predictionScratchUb_.GetPhyAddr();
+        __ubuf__ float *outputScratch = (__ubuf__ float *)outputScratchUb_.GetPhyAddr();
         RecurrentKdaTokenVf<State, Gate, Beta, V_FIRST, FUSED>(
             (__ubuf__ State *)stateBanks_[target].GetPhyAddr(),
             (__ubuf__ State *)stateBanks_[source].GetPhyAddr(),
@@ -816,7 +841,7 @@ private:
             (__ubuf__ Beta *)betaTile_[buffer][token * (32 / sizeof(Beta))].GetPhyAddr(),
             (__ubuf__ float *)biasUb_[parameterBuffer].GetPhyAddr(),
             (__ubuf__ bfloat16_t *)outputTile_[buffer][token * DIM].GetPhyAddr(),
-            tiling_->scale, aLog, vfFlags_, tiling_->lowerBound, predictionScratch);
+            tiling_->scale, aLog, vfFlags_, tiling_->lowerBound, predictionScratch, outputScratch);
     }
 
     const RecurrentKdaTilingData *tiling_;
@@ -835,6 +860,7 @@ private:
     LocalTensor<Beta> betaTile_[INPUT_BUFFERS];
     LocalTensor<float> biasUb_[PARAMETER_BUFFERS];
     LocalTensor<float> predictionScratchUb_;
+    LocalTensor<float> outputScratchUb_;
     uint32_t vfFlags_ = 0;
     uint64_t cachedRequest_ = uint64_t(-1);
     int64_t sequenceBegin_ = 0;

@@ -46,22 +46,21 @@ static constexpr size_t RKDA_DIM_3 = 3;
 
 static constexpr uint32_t RKDA_LAYOUT_BSND = 0;
 static constexpr uint32_t RKDA_LAYOUT_TND = 1;
-// A2/A3 input window capacity; A5 retains its sequence-length limit.
+// A2/A3 与 A6 兼容实现的输入窗口容量（段长可越过窗口，按窗口顺序递推）；
+// A5 沿用该值作为每段序列长度上限。
 static constexpr size_t RKDA_MAX_MTP = 8;
 static constexpr int64_t RKDA_INPUT_BUFFER_NUM = 2;
 static constexpr int64_t RKDA_UB_GUARD_BYTES = 2048;
 static constexpr size_t RKDA_SYS_WORKSPACE_SIZE = 16U * 1024U * 1024U;
 // On A5, broadTmp aliases state in UB when K hits this fused-reduce size.
 static constexpr int64_t RKDA_FUSED_REDUCE_K = 128;
-// A6(DAV_9201) 静态 UB 引擎的布局常量，需与 op_kernel/arch92/recurrent_kda_engine.h 保持一致。
-static constexpr int64_t RKDA_A6_DIM = 128;
-// A6 向量 UB 为 384 KiB，每 tile 32 个 token；与 arch92 引擎的 TOKEN_TILE 保持一致。
-static constexpr int64_t RKDA_A6_TOKEN_TILE = 32;
-// FP32 State bank 为 64 KiB，沿用 3 份；BF16 bank 为 32 KiB，多留一份用于初态预取。
-static constexpr int64_t RKDA_A6_FP32_STATE_BANKS = 3;
-static constexpr int64_t RKDA_A6_BF16_STATE_BANKS = 4;
-static constexpr int64_t RKDA_A6_INPUT_BUFFERS = 2;
-static constexpr int64_t RKDA_A6_PARAMETER_BUFFERS = 2;
+// A6(DAV_9201) 静态 UB 引擎的布局常量定义在 op_kernel/recurrent_kda_struct.h，
+// host 与 kernel 共用同一份，避免各自维护。
+using RecurrentKda::RKDA_A6_BF16_STATE_BANKS;
+using RecurrentKda::RKDA_A6_DIM;
+using RecurrentKda::RKDA_A6_FP32_STATE_BANKS;
+using RecurrentKda::RKDA_A6_INPUT_BUFFERS;
+using RecurrentKda::RKDA_A6_TOKEN_TILE;
 
 struct RecurrentKdaTilingContext {
     const char *nodeName = "RecurrentKda";
@@ -188,7 +187,8 @@ private:
 
     RecurrentKdaTilingContext ctx_;
 
-    // arch92 引擎的静态 UB 用量：State bank + 输入/输出双槽 + dt_bias 双槽 + VF scratch。
+    // arch92 引擎的静态 UB 用量与 kernel 共用 RkdaA6UbBytes，任一侧改常量都会
+    // 在 kernel 的 static_assert 处编译失败。
     int64_t A6StateBanks() const
     {
         return (ctx_.stateDtype == ge::DT_FLOAT) ? RKDA_A6_FP32_STATE_BANKS : RKDA_A6_BF16_STATE_BANKS;
@@ -197,18 +197,13 @@ private:
     int64_t CalcA6UbBytes() const
     {
         const int64_t stateBytes = (ctx_.stateDtype == ge::DT_FLOAT) ? 4 : 2;
-        const int64_t bankBytes = RKDA_A6_DIM * RKDA_A6_DIM * stateBytes;
-        const int64_t slotBytes = 4 * RKDA_A6_TOKEN_TILE * RKDA_A6_DIM * 2 + // q/k/v/out bf16
-                                  RKDA_A6_TOKEN_TILE * RKDA_A6_DIM * 4 +    // gate fp32
-                                  RKDA_A6_TOKEN_TILE * 32;                  // beta 与标量
-        return A6StateBanks() * bankBytes + RKDA_A6_INPUT_BUFFERS * slotBytes +
-               RKDA_A6_PARAMETER_BUFFERS * RKDA_A6_DIM * 4 + RKDA_A6_DIM * 4;
+        return RecurrentKda::RkdaA6UbBytes(A6StateBanks(), RKDA_A6_TOKEN_TILE, stateBytes);
     }
 
     ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
     {
         const int64_t ubSize = static_cast<int64_t>(ctx_.ubSize);
-        // 静态布局之外再留出 2 KiB 余量，避免与框架占用的尾部空间重叠。
+        // 静态布局之外再留出一段余量，避免与框架占用的尾部空间重叠。
         const int64_t usedBytes = CalcA6UbBytes() + RKDA_UB_GUARD_BYTES;
         OP_CHECK_IF(usedBytes > ubSize,
                     OP_LOGE(ctx_.nodeName, "A6 static UB needs %ld bytes but only %ld are available.",
@@ -547,16 +542,9 @@ private:
                     OP_LOGE(ctx_.nodeName, "HV must be an integer multiple of H, but HV is %ld and H is %ld.",
                             hvNum, hNum),
                     return ge::GRAPH_FAILED);
-        // A6 只有 V=128 走静态 UB 引擎；V 取其它值时回落到兼容实现，该实现按每段
-        // 至多 RKDA_MAX_MTP 个 token 分配缓冲。kernel 无法对超长段报错，因此在 host
-        // 侧对可静态判定的布局直接拒绝。
-        if (ctx_.isA6 != 0 && vDim != RKDA_A6_DIM && ctx_.hasCuSeqlens == 0 &&
-            denseSeqLen > static_cast<int64_t>(RKDA_MAX_MTP)) {
-            OP_LOGE(ctx_.nodeName,
-                    "A6 V=%ld only supports segments of at most %zu tokens, but the sequence length is %ld.",
-                    vDim, RKDA_MAX_MTP, denseSeqLen);
-            return ge::GRAPH_FAILED;
-        }
+        // A6 只有 V=128 走静态 UB 引擎；V 取其它值时回落到按 RKDA_MAX_MTP 个 token
+        // 分配输入缓冲的兼容实现。兼容实现按窗口顺序递推，段长超过窗口也不影响语义，
+        // 因此这里不对 varlen/dense 的段长做任何拦截。
         if (!CheckDim(stateShape, RKDA_STATE_DIM_NUM, "initial_state")) {
             return ge::GRAPH_FAILED;
         }
@@ -769,7 +757,9 @@ private:
     {
         int64_t coeff = 4 * aDk + 8; // state and row outputs.
         if (ctx_.isA5 == 0 || aDk != RKDA_FUSED_REDUCE_K) {
-            coeff += 4 * aDk; // broadTmp for the generic matvec path.
+            // 公共 kernel 的 broadTmp；arch92 兼容实现不使用这块预算，只从中划出
+            // 4*aDk 作为 dt_bias 暂存（见 recurrent_kda_legacy.h 的 gateBiasInUb）。
+            coeff += 4 * aDk;
         }
         return coeff;
     }
