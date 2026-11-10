@@ -822,6 +822,17 @@ private:
     {
         (void)coeff;
         int64_t aDk = Ops::Base::CeilAlign(tiling.dk, static_cast<uint32_t>(16));
+
+        // ===== A6 legacy 路径双槽 ping-pong：提前算 extraSlotBytes，让 EvaluateBufferProfile
+        // 用包含双槽的 usedUbBytes 选 vStep，避免 tmpBytes + extraSlotBytes > ubRestBytes =====
+        int64_t extraSlotBytes = 0;
+        int64_t effectiveUsedUb = usedUbBytes;
+        if (ctx_.isA5 == 0) {
+            const int64_t betaHeads = static_cast<int64_t>(tiling.nv);
+            extraSlotBytes = RKDA_MAX_MTP * (4 * ubCalcCtx.aDv + 12 * aDk + 4 * betaHeads);
+            effectiveUsedUb += extraSlotBytes;
+        }
+
         BufferProfile selected;
         const std::array<BufferProfile, 3> candidates = {{
             {1, 1, 0, 0, false},
@@ -830,7 +841,7 @@ private:
         }};
         for (const auto &candidate : candidates) {
             BufferProfile profile;
-            if (!EvaluateBufferProfile(ubSize, usedUbBytes, aDk, candidate.stateOutBufferNum,
+            if (!EvaluateBufferProfile(ubSize, effectiveUsedUb, aDk, candidate.stateOutBufferNum,
                                        candidate.attnOutBufferNum, tiling, profile)) {
                 continue;
             }
@@ -852,25 +863,22 @@ private:
             OP_LOGE(ctx_.nodeName, "ubRestBytes should be non-negative, but got %ld", ubRestBytes);
             return ge::GRAPH_FAILED;
         }
-        if (ctx_.isA5 == 0) {
-            // A6 legacy 路径启用 BUFFER_NUM=2 双槽 ping-pong：slot 1 比 slot 0 多分配一份
-            // v/q/k/beta/gate 输入缓冲。stateInUb 和 gateBiasInUb 是共享工作区，不随 slot
-            // 切换，不需要额外预算。
-            const int64_t betaHeads = ctx_.isA5 != 0 ? ubCalcCtx.aNv : static_cast<int64_t>(tiling.nv);
-            const int64_t extraSlotBytes =
-                RKDA_MAX_MTP * (4 * ubCalcCtx.aDv + 12 * aDk + 4 * betaHeads);
-            const int64_t tmpBytes = ubCalcCtx.workingUbBytes - ubCalcCtx.fixedUbBytes +
-                                     CalcComputeUbCoeff(aDk) * static_cast<int64_t>(selected.vStep) +
-                                     extraSlotBytes;
-            if (tmpBytes > ubRestBytes) {
-                OP_LOGE(ctx_.nodeName, "packed input buffers (dual slot) exceed the UB budget: "
-                                       "need %ld, available %ld (vStep=%ld aDk=%ld aDv=%ld)",
-                        tmpBytes, ubRestBytes, selected.vStep, aDk, ubCalcCtx.aDv);
-                return ge::GRAPH_FAILED;
-            }
-            // Generic A2/A3 kernels allocate only named live scratch slices.
-            ubRestBytes = tmpBytes;
+
+        // Kernel InitLocalBuffers 实际需要：delta + attn + state + gateBias + slot0(v+q+k+beta+gate)
+        // + slot1(v+q+k+beta+gate)。host workingUbBytes - fixedUbBytes 只覆盖单槽输入，
+        // 双槽需要再加一份 extraSlotBytes（= slot1 v+q+k+beta+gate）。
+        // 注意：因为 EvaluateBufferProfile 已经用 effectiveUsedUb 把双槽算进去了，vStep 是缩小后的值，
+        // 所以 tmpBytes 一定 <= ubRestBytes，不需要再单独 check。
+        const int64_t tmpBytes = ubCalcCtx.workingUbBytes - ubCalcCtx.fixedUbBytes +
+                                 CalcComputeUbCoeff(aDk) * static_cast<int64_t>(selected.vStep) +
+                                 extraSlotBytes;
+        if (tmpBytes > ubRestBytes) {
+            OP_LOGE(ctx_.nodeName, "packed input buffers exceed UB: need %ld, avail %ld (vStep=%ld)",
+                    tmpBytes, ubRestBytes, selected.vStep);
+            return ge::GRAPH_FAILED;
         }
+        ubRestBytes = tmpBytes;
+
         tiling.ubCalSize = static_cast<uint32_t>(ctx_.ubSize);
         tiling.vStep = selected.vStep;
         tiling.stateOutBufferNum = selected.stateOutBufferNum;
