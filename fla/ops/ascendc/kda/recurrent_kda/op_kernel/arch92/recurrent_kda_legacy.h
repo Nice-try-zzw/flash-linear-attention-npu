@@ -28,7 +28,10 @@ namespace RecurrentKda {
 using namespace matmul;
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
-constexpr uint64_t BUFFER_NUM = 1;
+// 输入缓冲使用双槽，让 MTE2 搬下一个窗口与 VF 消费当前窗口在窗口间流水重叠。
+// host CalcFixedUbBytes 对 A6 已按 rawBufferNum=2 核算预算；本路径（非 V=128 静态引擎）
+// 走 legacy 5 步流程，vStep 由 FinalizeVStepFromUb 从剩余 UB 里切出。
+constexpr uint64_t BUFFER_NUM = 2;
 constexpr uint64_t INPUT_BUFFER_NUM = 2;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
 // 单次搬入的 token 数上限。段长超过该值时按窗口顺序递推，不是段长限制。
@@ -267,12 +270,13 @@ public:
         buffOffset += singleVSize;
         attnInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(vStep_), buffOffset);
         buffOffset += singleVSize;
+        // ping-pong 双槽输入缓冲：slot 0 先分配，slot 1 紧接其后。
         vInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_), buffOffset);
-        buffOffset += vSize;
+        buffOffset += vSize * BUFFER_NUM;
         qInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize;
+        buffOffset += kSize * BUFFER_NUM;
         kInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
-        buffOffset += kSize;
+        buffOffset += kSize * BUFFER_NUM;
         stateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
         buffOffset += cubeSize;
         // dt_bias 独立占一份缓冲：窗口递推后 QKV/gate 的搬入发生在 state 装载之后，
@@ -280,8 +284,25 @@ public:
         gateBiasInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_), buffOffset);
         buffOffset += static_cast<uint32_t>(alignK_ * sizeof(float));
         betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)), buffOffset);
-        buffOffset += betaUbSize;
+        buffOffset += betaUbSize * BUFFER_NUM;
         gateInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_), buffOffset);
+        buffOffset += kSize * BUFFER_NUM;
+
+        // slot 1 起点 = slot 0 起点 + 单槽容量。
+        qInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_),
+            static_cast<uint32_t>(vSize * BUFFER_NUM + kSize + kSize));
+        kInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_),
+            static_cast<uint32_t>(vSize * BUFFER_NUM + kSize * BUFFER_NUM + kSize + kSize));
+        vInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignV_),
+            vSize + vSize);
+        betaInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaUbSize / sizeof(float)),
+            static_cast<uint32_t>(singleVSize * 2 + vSize * BUFFER_NUM + kSize * BUFFER_NUM * 2 +
+                                  cubeSize + static_cast<uint32_t>(alignK_ * sizeof(float)) +
+                                  betaUbSize + betaUbSize));
+        gateInUb2 = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(MAX_MTP * alignK_),
+            static_cast<uint32_t>(singleVSize * 2 + vSize * BUFFER_NUM + kSize * BUFFER_NUM * 2 +
+                                  cubeSize + static_cast<uint32_t>(alignK_ * sizeof(float)) +
+                                  betaUbSize * BUFFER_NUM + kSize));
     }
 
     __aicore__ inline void SyncMte2ToV()
@@ -765,16 +786,16 @@ private:
         }
     }
 
-    __aicore__ inline void ApplyGateInKernel(int32_t rows)
+    __aicore__ inline void ApplyGateInKernel(int32_t rows, uint32_t slot)
     {
-        GateTransformVF(reinterpret_cast<__ubuf__ float *>(gateInUb.GetPhyAddr()),
+        GateTransformVF(reinterpret_cast<__ubuf__ float *>(GateSlot(slot).GetPhyAddr()),
                         reinterpret_cast<__ubuf__ float *>(gateBiasInUb.GetPhyAddr()),
                         static_cast<uint32_t>(rows), gateExpA_, lowerBound_, safeGate_, hasDtBias_);
         PipeBarrier<PIPE_V>();
     }
 
     template <typename gateType>
-    __aicore__ inline void CopyInGate(uint64_t gateOffset, int32_t seqLen)
+    __aicore__ inline void CopyInGate(uint64_t gateOffset, int32_t seqLen, uint32_t slot)
     {
         LocalTensor<gateType> gateLocal = gateInQueue_.AllocTensor<gateType>();
         SyncVToMte2();
@@ -792,7 +813,7 @@ private:
         }
         gateInQueue_.EnQue<gateType>(gateLocal);
         gateLocal = gateInQueue_.DeQue<gateType>();
-        UnpackRowsVF<gateType, 128>(reinterpret_cast<__ubuf__ float *>(gateInUb.GetPhyAddr()),
+        UnpackRowsVF<gateType, 128>(reinterpret_cast<__ubuf__ float *>(GateSlot(slot).GetPhyAddr()),
                                     reinterpret_cast<__ubuf__ gateType *>(gateLocal.GetPhyAddr()),
                                     static_cast<uint32_t>(seqLen));
         gateInQueue_.FreeTensor(gateLocal);
@@ -801,7 +822,7 @@ private:
 
     // 只搬入当前窗口 [windowStart, windowStart + windowLen) 的 Q/K/V/gate，
     // 供本 v-tile 内该窗口的逐 token 递推使用。
-    __aicore__ inline void CopyInQKVGate(int64_t windowStart, int32_t windowLen, uint64_t head_i)
+    __aicore__ inline void CopyInQKVGate(int64_t windowStart, int32_t windowLen, uint64_t head_i, uint32_t slot)
     {
         uint64_t qkHead = head_i / (NV_ / NK_);
         uint64_t qOffset = static_cast<uint64_t>(windowStart) * queryTokenStride_ + qkHead * queryHeadStride_;
@@ -828,34 +849,34 @@ private:
         kInQueue_.EnQue<inType>(kLocal);
         vInQueue_.EnQue<inType>(vLocal);
         if (gateDtype_ == 0) {
-            CopyInGate<float>(gateOffset, windowLen);
+            CopyInGate<float>(gateOffset, windowLen, slot);
         } else if (gateDtype_ == 1) {
-            CopyInGate<bfloat16_t>(gateOffset, windowLen);
+            CopyInGate<bfloat16_t>(gateOffset, windowLen, slot);
         } else {
-            CopyInGate<half>(gateOffset, windowLen);
+            CopyInGate<half>(gateOffset, windowLen, slot);
         }
 
         qLocal = qInQueue_.DeQue<inType>();
         kLocal = kInQueue_.DeQue<inType>();
         vLocal = vInQueue_.DeQue<inType>();
-        UnpackRowsVF<inType, 128>(reinterpret_cast<__ubuf__ float *>(qInUb.GetPhyAddr()),
+        UnpackRowsVF<inType, 128>(reinterpret_cast<__ubuf__ float *>(QSlot(slot).GetPhyAddr()),
                                   reinterpret_cast<__ubuf__ inType *>(qLocal.GetPhyAddr()),
                                   static_cast<uint32_t>(windowLen));
-        UnpackRowsVF<inType, 128>(reinterpret_cast<__ubuf__ float *>(kInUb.GetPhyAddr()),
+        UnpackRowsVF<inType, 128>(reinterpret_cast<__ubuf__ float *>(KSlot(slot).GetPhyAddr()),
                                   reinterpret_cast<__ubuf__ inType *>(kLocal.GetPhyAddr()),
                                   static_cast<uint32_t>(windowLen));
-        UnpackRowsVF<inType, 256>(reinterpret_cast<__ubuf__ float *>(vInUb.GetPhyAddr()),
+        UnpackRowsVF<inType, 256>(reinterpret_cast<__ubuf__ float *>(VSlot(slot).GetPhyAddr()),
                                   reinterpret_cast<__ubuf__ inType *>(vLocal.GetPhyAddr()),
                                   static_cast<uint32_t>(windowLen));
         AscendC::PipeBarrier<PIPE_V>();
-        NormScaleVF(reinterpret_cast<__ubuf__ float *>(qInUb.GetPhyAddr()),
-                    reinterpret_cast<__ubuf__ float *>(kInUb.GetPhyAddr()),
+        NormScaleVF(reinterpret_cast<__ubuf__ float *>(QSlot(slot).GetPhyAddr()),
+                    reinterpret_cast<__ubuf__ float *>(KSlot(slot).GetPhyAddr()),
                     static_cast<uint32_t>(windowLen), scale_, useQkL2norm_);
         AscendC::PipeBarrier<PIPE_V>();
         if (useGateInKernel_) {
-            ApplyGateInKernel(windowLen);
+            ApplyGateInKernel(windowLen, slot);
         }
-        GateExpVF(reinterpret_cast<__ubuf__ float *>(gateInUb.GetPhyAddr()), static_cast<uint32_t>(windowLen));
+        GateExpVF(reinterpret_cast<__ubuf__ float *>(GateSlot(slot).GetPhyAddr()), static_cast<uint32_t>(windowLen));
         AscendC::PipeBarrier<PIPE_V>();
 
         qInQueue_.FreeTensor(qLocal);
@@ -1037,15 +1058,15 @@ private:
     }
 
     __aicore__ inline void Compute(uint32_t curSingleV, uint64_t curQKOffset,
-                                   uint64_t curVOffset, uint64_t betaOffset)
+                                   uint64_t curVOffset, uint64_t betaOffset, uint32_t slot)
     {
         // K 恒为 128：decay/S@k 与 delta/outer/S@q 都走 regbase 融合 VF。
-        DecayMatVecReduce128(stateInUb, gateInUb[curQKOffset],
-                             kInUb[curQKOffset], deltaInUb, curSingleV);
+        DecayMatVecReduce128(stateInUb, GateSlot(slot)[curQKOffset],
+                             KSlot(slot)[curQKOffset], deltaInUb, curSingleV);
         AscendC::PipeBarrier<PIPE_V>();
-        ProcessDeltaKQReduce128Dispatch(deltaInUb, vInUb[curVOffset],
-                                        betaInUb, betaOffset, kInUb[curQKOffset], stateInUb,
-                                        qInUb[curQKOffset], attnInUb, curSingleV);
+        ProcessDeltaKQReduce128Dispatch(deltaInUb, VSlot(slot)[curVOffset],
+                                        BetaSlot(slot), betaOffset, KSlot(slot)[curQKOffset], stateInUb,
+                                        QSlot(slot)[curQKOffset], attnInUb, curSingleV);
 
         LocalTensor<outType> attnOutLocal = attnOutQueue_.AllocTensor<outType>();
         if (shouldStoreState_) {
@@ -1101,8 +1122,29 @@ private:
         stateOutQueue_.FreeTensor(stateOutLocal);
     }
 
+    __aicore__ inline LocalTensor<float> &BetaSlot(uint32_t slot)
+    {
+        return slot == 0 ? betaInUb : betaInUb2;
+    }
+    __aicore__ inline LocalTensor<float> &QSlot(uint32_t slot)
+    {
+        return slot == 0 ? qInUb : qInUb2;
+    }
+    __aicore__ inline LocalTensor<float> &KSlot(uint32_t slot)
+    {
+        return slot == 0 ? kInUb : kInUb2;
+    }
+    __aicore__ inline LocalTensor<float> &VSlot(uint32_t slot)
+    {
+        return slot == 0 ? vInUb : vInUb2;
+    }
+    __aicore__ inline LocalTensor<float> &GateSlot(uint32_t slot)
+    {
+        return slot == 0 ? gateInUb : gateInUb2;
+    }
+
     template <typename betaType>
-    __aicore__ inline void CopyInBetaTyped(int64_t seq0, int64_t seq1, uint64_t head)
+    __aicore__ inline void CopyInBetaTyped(int64_t seq0, int64_t seq1, uint64_t head, uint32_t slot)
     {
         int64_t seqLen = seq1 - seq0;
         constexpr uint64_t betaRowStride = 32 / sizeof(betaType);
@@ -1123,26 +1165,20 @@ private:
         }
         betaInQueue_.EnQue<betaType>(betaLocal);
         betaLocal = betaInQueue_.DeQue<betaType>();
-        if constexpr (std::is_same<betaType, float32_t>()) {
-            UnpackFlatVF<betaType>(reinterpret_cast<__ubuf__ float *>(betaInUb.GetPhyAddr()),
-                                   reinterpret_cast<__ubuf__ betaType *>(betaLocal.GetPhyAddr()), static_cast<uint32_t>(betaCount));
-        } else {
-            UnpackFlatVF<betaType>(reinterpret_cast<__ubuf__ float *>(betaInUb.GetPhyAddr()),
-                                   reinterpret_cast<__ubuf__ betaType *>(betaLocal.GetPhyAddr()), static_cast<uint32_t>(betaCount));
-        }
+        UnpackFlatVF<betaType>(reinterpret_cast<__ubuf__ float *>(BetaSlot(slot).GetPhyAddr()),
+                               reinterpret_cast<__ubuf__ betaType *>(betaLocal.GetPhyAddr()),
+                               static_cast<uint32_t>(betaCount));
         betaInQueue_.FreeTensor(betaLocal);
-        PipeBarrier<PIPE_V>();
-
     }
 
-    __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1, uint64_t head)
+    __aicore__ inline void CopyInBeta(int64_t seq0, int64_t seq1, uint64_t head, uint32_t slot)
     {
         if (betaDtype_ == 0) {
-            CopyInBetaTyped<float>(seq0, seq1, head);
+            CopyInBetaTyped<float>(seq0, seq1, head, slot);
         } else if (betaDtype_ == 1) {
-            CopyInBetaTyped<bfloat16_t>(seq0, seq1, head);
+            CopyInBetaTyped<bfloat16_t>(seq0, seq1, head, slot);
         } else {
-            CopyInBetaTyped<half>(seq0, seq1, head);
+            CopyInBetaTyped<half>(seq0, seq1, head, slot);
         }
     }
 
@@ -1190,17 +1226,19 @@ private:
             bool hasPendingAttn = false;
             bool hasPendingState = false;
             // 段长超过输入窗口时按窗口顺序递推：state 在同一个 v-tile 内跨窗口原地续接，
-            // 只有 Q/K/V/gate/beta 的窗口缓冲被重新搬入。
+            // 只有 Q/K/V/gate/beta 的窗口缓冲被重新搬入。双槽 ping-pong：slot 0 与 slot 1
+            // 在窗口间交替，让 MTE2 搬下一窗口与 VF 消费当前窗口不再共用同一块输入 UB。
             int64_t windowStart = seq0;
+            uint32_t slot = 0;
             while (windowStart < seq1) {
                 const int64_t remaining = seq1 - windowStart;
                 const int32_t windowLen = static_cast<int32_t>(
                     remaining < static_cast<int64_t>(MAX_MTP) ? remaining : static_cast<int64_t>(MAX_MTP));
                 const int64_t windowEnd = windowStart + windowLen;
-                // 窗口共用同一组输入缓冲：先让上一个窗口的 VF 读完，再覆盖 UB。
+                // 等上一窗口 VF 排空，确保共享工作区（delta/attnInUb）不再被访问后再进入新窗口。
                 AscendC::PipeBarrier<PIPE_V>();
-                CopyInBeta(windowStart, windowEnd, head_i);
-                CopyInQKVGate(windowStart, windowLen, head_i);
+                CopyInBeta(windowStart, windowEnd, head_i, slot);
+                CopyInQKVGate(windowStart, windowLen, head_i, slot);
                 for (int64_t seq_i = windowStart; seq_i < windowEnd; seq_i++) {
                     const uint64_t localIdx = static_cast<uint64_t>(seq_i - windowStart);
                     uint64_t betaOffset = localIdx;
@@ -1209,7 +1247,7 @@ private:
                     uint64_t attnOffset = (static_cast<uint64_t>(seq_i) * NV_ + head_i) * realV_ + v_i;
                     uint64_t curStateSlot = StateSlotForToken(batchIdx, seq0, seq_i);
                     uint64_t curStateOutSlot = curStateSlot;
-                    Compute(curSingleV, curQKOffset, curVOffset, betaOffset);
+                    Compute(curSingleV, curQKOffset, curVOffset, betaOffset, slot);
                     if (attnOutBufferNum_ == BUFFER_NUM) {
                         CopyOutAttn(attnOffset, curSingleV);
                     } else {
@@ -1232,6 +1270,7 @@ private:
                     }
                 }
                 windowStart = windowEnd;
+                slot ^= 1;  // 双槽切换：下一窗口使用另一块输入 UB。
             }
             if (hasPendingAttn) {
                 CopyOutAttn(pendingAttnOffset, curSingleV);
@@ -1281,6 +1320,12 @@ private:
     LocalTensor<float> vInUb;
     LocalTensor<float> gateInUb;
     LocalTensor<float> betaInUb;
+    // 窗口 ping-pong 双槽：slot 1 与 slot 0 同容量，让 MTE2 搬下一个窗口与 VF 消费当前窗口重叠。
+    LocalTensor<float> qInUb2;
+    LocalTensor<float> kInUb2;
+    LocalTensor<float> vInUb2;
+    LocalTensor<float> gateInUb2;
+    LocalTensor<float> betaInUb2;
     LocalTensor<float> deltaInUb;
     LocalTensor<float> gateBiasInUb;
     LocalTensor<float> attnInUb;
