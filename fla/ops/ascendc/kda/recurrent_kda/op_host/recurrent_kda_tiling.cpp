@@ -218,9 +218,10 @@ ge::graphStatus RecurrentKdaTiling::DoOpTiling()
 ge::graphStatus RecurrentKdaTiling::DoLibApiTiling()
 {
     uint32_t kernelMode = RKDA_TPL_COMPAT;
-    if (compileInfo_.isA6 && tilingData_.dv == 128) {
-        // A6 的 V=128 由 arch92 静态 UB 引擎处理：State 布局决定 V/K 两条主线，
-        // norm + raw gate + dt_bias + beta sigmoid 且无负特征值时走预先融合的实例。
+    if (compileInfo_.isA6) {
+        // A6 的 V=128 与 V=256 都由 arch92 静态 UB 引擎处理（V=256 在引擎内按 DIM
+        // 切片）：State 布局决定 V/K 两条主线，norm + raw gate + dt_bias + beta sigmoid
+        // 且无负特征值时走预先融合的实例。
         const bool fused = tilingData_.useQkL2norm != 0 && tilingData_.useGateInKernel != 0 &&
             tilingData_.hasDtBias != 0 && tilingData_.useBetaSigmoid != 0 &&
             tilingData_.allowNegEigval == 0 && tilingData_.safeGate == 0;

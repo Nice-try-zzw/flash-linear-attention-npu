@@ -4,9 +4,9 @@
 
 #include "ascendc/host_api/tiling/template_argument.h"
 
-// A6（DAV_9201）静态 UB 引擎的编译期实例。COMPAT 走兼容实现（A2/A3 长窗口、
-// A5 V=256），其余四档走 arch92 的逐 token VF 引擎；V/K 两种 State 布局各自
-// 再分通用与常用融合两种，避免枚举全部布尔组合造成编译膨胀。
+// A6（DAV_9201）静态 UB 引擎的编译期实例。A6 的 V=128 与 V=256 都由 arch92 引擎
+// 处理（V=256 在引擎内按 DIM 切片），因此只生成 V/K 两种 State 布局与常用融合档
+// 共四档；COMPAT 留给 A2/A3 与 A5 的公共 kernel。
 #define RKDA_TPL_COMPAT 0
 #define RKDA_TPL_V_FIRST 1
 #define RKDA_TPL_K_FIRST 2
@@ -30,5 +30,5 @@ ASCENDC_TPL_SEL(
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_KERNEL_TYPE_SEL(ASCENDC_TPL_AIV_ONLY),
         ASCENDC_TPL_UINT_SEL(KERNEL_MODE, ASCENDC_TPL_UI_LIST,
-            RKDA_TPL_COMPAT, RKDA_TPL_V_FIRST, RKDA_TPL_K_FIRST, RKDA_TPL_V_FIRST_FUSED, RKDA_TPL_K_FIRST_FUSED)));
+            RKDA_TPL_V_FIRST, RKDA_TPL_K_FIRST, RKDA_TPL_V_FIRST_FUSED, RKDA_TPL_K_FIRST_FUSED)));
 #endif

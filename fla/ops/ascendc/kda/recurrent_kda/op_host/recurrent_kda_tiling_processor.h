@@ -46,7 +46,7 @@ static constexpr size_t RKDA_DIM_3 = 3;
 
 static constexpr uint32_t RKDA_LAYOUT_BSND = 0;
 static constexpr uint32_t RKDA_LAYOUT_TND = 1;
-// A2/A3 与 A6 兼容实现的输入窗口容量（段长可越过窗口，按窗口顺序递推）；
+// A2/A3 的输入窗口容量（段长可越过窗口，按窗口顺序递推）；
 // A5 沿用该值作为每段序列长度上限。
 static constexpr size_t RKDA_MAX_MTP = 8;
 static constexpr int64_t RKDA_INPUT_BUFFER_NUM = 2;
@@ -110,7 +110,8 @@ struct RecurrentKdaTilingContext {
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
     uint32_t isA5 = 0;
-    // A6(ascend960dt, DAV_9201)：V=128 走 arch92 静态 UB 引擎，UB 预算按平台实际值复核。
+    // A6(ascend960dt, DAV_9201)：V=128 与 V=256 都走 arch92 静态 UB 引擎，
+    // V=256 在引擎内按 DIM 切片；UB 预算按平台实际值复核。
     uint32_t isA6 = 0;
 };
 
@@ -142,8 +143,9 @@ public:
 
     ge::graphStatus ProcessUb(RecurrentKdaTilingData &tiling) const
     {
-        if (ctx_.isA6 != 0 && tiling.dv == 128) {
-            // A6 的 V=128 由 arch92 静态 UB 引擎接管，UB 布局与 buffer 数在编译期确定。
+        if (ctx_.isA6 != 0) {
+            // A6 的 V=128 与 V=256 都由 arch92 静态 UB 引擎接管：UB 布局、buffer 数
+            // 与 V 切片在编译期确定，不需要公共 kernel 的 vStep 搜索。
             return PlanA6Ub(tiling);
         }
         struct RuleItem {
@@ -211,8 +213,8 @@ private:
                     return ge::GRAPH_FAILED);
         tiling.ubCalSize = static_cast<uint32_t>(ctx_.ubSize);
         tiling.ubRestBytes = static_cast<uint32_t>(ubSize - usedBytes);
-        // arch92 引擎在编译期自行布局并一次处理完整 V，以下字段只用于保持与兼容路径
-        // 相同的 tiling 语义，引擎不读取。
+        // arch92 引擎在编译期自行布局，并把 V 维按 RKDA_A6_DIM 切片串行处理；
+        // 以下字段只用于保持 tiling 语义一致，引擎不读取。
         tiling.vStep = static_cast<uint32_t>(RKDA_A6_DIM);
         tiling.stateOutBufferNum = static_cast<uint32_t>(A6StateBanks());
         tiling.attnOutBufferNum = static_cast<uint32_t>(RKDA_A6_INPUT_BUFFERS);
@@ -734,31 +736,8 @@ private:
         return ge::GRAPH_SUCCESS;
     }
 
-    // A6 的 arch92 兼容实现（RKDALegacy）独立计算窗口预算，不复用 A5 的判定条件：
-    // 它的 raw 缓冲是单槽，beta 队列固定为 MAX_MTP * BF16_NUM_PER_BLOCK，与 nv 无关。
-    int64_t CalcA6LegacyFixedUbBytes(int64_t aDv, int64_t aDk) const
-    {
-        const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
-        const int64_t betaHeads = static_cast<int64_t>(RKDA_MAX_MTP) * 16;
-        int64_t usedUbBytes = rawBytes;
-        usedUbBytes += RKDA_MAX_MTP * 4 * betaHeads;
-        usedUbBytes += 64 + RKDA_UB_GUARD_BYTES;
-        return usedUbBytes;
-    }
-
-    int64_t CalcA6LegacyWorkingUbBytes(int64_t aDv, int64_t aDk) const
-    {
-        const int64_t betaHeads = static_cast<int64_t>(RKDA_MAX_MTP) * 16;
-        int64_t usedUbBytes = CalcA6LegacyFixedUbBytes(aDv, aDk);
-        usedUbBytes += RKDA_MAX_MTP * (4 * aDv + 12 * aDk + 4 * betaHeads);
-        return usedUbBytes;
-    }
-
     int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
-        if (ctx_.isA6 != 0) {
-            return CalcA6LegacyFixedUbBytes(aDv, aDk);
-        }
         const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
         const int64_t rawBufferNum = ctx_.isA5 != 0 ? 1 : 2;
         const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
@@ -770,9 +749,6 @@ private:
 
     int64_t CalcWorkingUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
-        if (ctx_.isA6 != 0) {
-            return CalcA6LegacyWorkingUbBytes(aDv, aDk);
-        }
         const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
         int64_t usedUbBytes = CalcFixedUbBytes(aNv, aDv, aDk, nv);
         usedUbBytes += RKDA_MAX_MTP * (4 * aDv + 12 * aDk + 4 * betaHeads);
@@ -783,8 +759,8 @@ private:
     {
         int64_t coeff = 4 * aDk + 8; // state and row outputs.
         if (ctx_.isA5 == 0 || aDk != RKDA_FUSED_REDUCE_K) {
-            // 公共 kernel 的 broadTmp；arch92 兼容实现不使用这块预算，只从中划出
-            // 4*aDk 作为 dt_bias 暂存（见 recurrent_kda_legacy.h 的 gateBiasInUb）。
+            // 公共 kernel（A2/A3）的 broadTmp。A5 命中 fused-reduce 时 broadTmp 复用
+            // state，不再单独预留。
             coeff += 4 * aDk;
         }
         return coeff;

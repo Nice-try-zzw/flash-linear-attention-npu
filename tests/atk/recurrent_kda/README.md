@@ -17,9 +17,9 @@
 - `cu_seqlens` 可选；传入时为同设备 `INT32/INT64` tensor，shape 为 `[seq_num+1]`，首项为 `0`，末项不超过 token capacity，offset 单调不减。
 - `q/k/v/out` 仅支持 `BFLOAT16`；`g/beta` 支持 `FLOAT/BFLOAT16/FLOAT16`，state 支持 `FP32/BF16`，`A_log/dt_bias` 支持 `FLOAT`。
 - `HV % H == 0`，`H/HV <= 256`；当前支持 `K=128,V=128` 或 `K=128,V=256`。
-- A2/A3 支持多时间窗口长序列；A5 每段仍不超过 8；A6 的 `V=128` 不限制每段长度，`V=256`
-  走 RegBase 兼容实现、按 8-token 窗口顺序递推，同样不限制每段长度；显式 `ssm_state_indices`
-  可使 `state_capacity > seq_num`。
+- A2/A3 支持多时间窗口长序列；A5 每段仍不超过 8；A6 的 `V=128` 与 `V=256` 都由 arch92 静态 UB
+  引擎按 token 递推、不限制每段长度（`V=256` 在引擎内把 State 的 V 维按 128 切片串行处理）；
+  显式 `ssm_state_indices` 可使 `state_capacity > seq_num`。
 - 当前 ATK 用例遵循上述约束，并通过 `case_spec` 固定具体取值；扩展用例时应继续满足这些限制。
 
 ## 标杆来源
@@ -63,10 +63,10 @@ A6 用例需在本目录按后文的 `atk node ...` 命令直接执行。`gen_re
 
 | TilingKey | 选择条件 | 精度普通用例 | 精度边界用例 | `_mss.json` 用例 | 适用 SoC | 实际选择证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `RKDA_TPL_COMPAT`(0) | 非 A6 平台（A2/A3/A5）全部；A6 且 `V!=128`（V=256） | A2/A3/A5：`atk_recurrent_kda.json` 0-2；A6：`a6_sim` 12-15 | `a6_sim` 42-45（V=256 每段 >8，窗口递推） | 0（A2/A3）、1（A6 V=256） | A2/A3/A5/A6 | 待运行时确认 |
-| `RKDA_TPL_V_FIRST`(1) | A6、V=128、`state_v_first`、非 fused | `a6_sim` 0/5/10/31 | `a6_sim` 38/40（T=33 跨 32-token tile） | 2 | A6 | 待运行时确认 |
-| `RKDA_TPL_K_FIRST`(2) | A6、V=128、`!state_v_first`、非 fused | `a6_sim` 1/6/19/32 | `a6_sim` 4/9/39/41（T=33） | 3 | A6 | 待运行时确认 |
-| `RKDA_TPL_V_FIRST_FUSED`(3) | A6、V=128、`state_v_first`，且 norm+raw gate+dt_bias+beta sigmoid、无负特征值、非 safe gate | `a6_sim` 46 | `a6_sim` 48（T=33） | 4 | A6 | 待运行时确认 |
+| `RKDA_TPL_COMPAT`(0) | 非 A6 平台（A2/A3/A5）全部 | `atk_recurrent_kda.json` 0-2 | — | 0 | A2/A3/A5 | 待运行时确认 |
+| `RKDA_TPL_V_FIRST`(1) | A6、`state_v_first`、非 fused（V=128/V=256 同规则） | `a6_sim` 0/5/10/31（V=128）、12/14/43/44（V=256） | `a6_sim` 38/40（T=33 跨 32-token tile） | 2 | A6 | 待运行时确认 |
+| `RKDA_TPL_K_FIRST`(2) | A6、`!state_v_first`、非 fused（V=128/V=256 同规则） | `a6_sim` 1/6/19/32（V=128）、13/15/42/45（V=256） | `a6_sim` 4/9/39/41（T=33） | 3 | A6 | 待运行时确认 |
+| `RKDA_TPL_V_FIRST_FUSED`(3) | A6、`state_v_first`，且 norm+raw gate+dt_bias+beta sigmoid、无负特征值、非 safe gate | `a6_sim` 46 | `a6_sim` 48（T=33） | 4 | A6 | 待运行时确认 |
 | `RKDA_TPL_K_FIRST_FUSED`(4) | 同上一行，但 `!state_v_first` | `a6_sim` 21 | `a6_sim` 47（T=33） | 5 | A6 | 待运行时确认 |
 
 
@@ -74,7 +74,7 @@ A6 用例需在本目录按后文的 `atk node ...` 命令直接执行。`gen_re
 
 | 包 | 数量 | 覆盖 |
 | --- | --- | --- |
-| `atk_recurrent_kda_a6_sim.json` | 49 | A6 仿真最小精度包，`T<=33`、单用例 `<=66` token：dense/均匀/ragged（含 0 长度段）/padding/单头/超多段；`V=256` 窗口递推（每段 9…33，跨 8/16/32 窗口）；state 布局×dtype×inplace×initial_none×strided；gate safe/raw/dt_bias_none/large_gate 与 `g/beta` 三种 dtype；融合 gate（norm+raw gate+dt_bias+beta sigmoid）在 `V_FIRST_FUSED`/`K_FIRST_FUSED` 两个 key 下的普通与 T=33 边界；slot packed/speculative×INT32/INT64；QKV view / 非连续输入；`inplace_final_state` 写回与 non-inplace 不变式；H/HV 比例 |
+| `atk_recurrent_kda_a6_sim.json` | 49 | A6 仿真最小精度包，`T<=33`、单用例 `<=66` token：dense/均匀/ragged（含 0 长度段）/padding/单头/超多段；`V=256` 按 128 切片递推（每段 9…33）；state 布局×dtype×inplace×initial_none×strided；gate safe/raw/dt_bias_none/large_gate 与 `g/beta` 三种 dtype；融合 gate（norm+raw gate+dt_bias+beta sigmoid）在 `V_FIRST_FUSED`/`K_FIRST_FUSED` 两个 key 下的普通与 T=33 边界；slot packed/speculative×INT32/INT64；QKV view / 非连续输入；`inplace_final_state` 写回与 non-inplace 不变式；H/HV 比例 |
 
 按分支对应的 case id（`id` 即用例序号）：
 
@@ -84,8 +84,8 @@ A6 用例需在本目录按后文的 `atk node ...` 命令直接执行。`gen_re
 | packed 均匀分段 | 5-6 |
 | ragged（含 0 长度段）/ padding 补齐 | 7-8 |
 | 单头路径（L2 norm 开/关）与 `B=32` 多段 | 9-11 |
-| `V=256` 兼容路径（每段 ≤8） | 12-15 |
-| `V=256` 窗口递推（每段 9…33，含 gate 预处理） | 42-45 |
+| `V=256` 短段（每段 ≤8，走 V 切片） | 12-15 |
+| `V=256` 长段（每段 9…33，含 gate 预处理） | 42-45 |
 | state 布局×dtype×inplace×initial_none×strided | 16-19 |
 | gate safe/raw/off/dt_bias_none/large 与 `g/beta` dtype | 20-26 |
 | slot packed/speculative × INT32/INT64 | 27-30 |
