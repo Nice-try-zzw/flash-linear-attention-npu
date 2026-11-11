@@ -76,8 +76,10 @@ o_t = S @ (q_t * scale)
 
 - `q/k/v/out` 仅支持 `BF16`。
 - Q/K/V 直接非连续访问要求 feature stride 为 1、head 间不重叠、token 间不重叠且 stride 为正；
-  BSND 在 `B>1` 时还要求 `batchStride == T * tokenStride`。已验证的 feature-gap、zero-stride
-  与 batch-gap view 自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
+  BSND 在 `B>1` 时还要求 `batchStride == T * tokenStride`。A6（`ascend960dt`）例外：其 arch92
+  引擎按 batch stride 单独寻址，`batchStride > T * tokenStride` 的 batch-gap view 也直接访问，
+  只要 batch 之间不重叠。其它平台已验证的 feature-gap、zero-stride 与 batch-gap view 自动回退
+  连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
 - `g/beta` Python 入口支持 `FP32/BF16/FP16`，aclnn 预处理后以 `FP32` 输入 kernel。
 - `A_log/dt_bias` 支持 `FP32`。
 - `cu_seqlens` 为必传、与 q 同设备的 INT32/INT64 Tensor；offset 必须单调不减，末项不得超过输入

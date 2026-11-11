@@ -238,8 +238,9 @@ A2/A5 精度验证过程中修复以下问题：
 
 - 当前仅支持 BF16 QKV。
 - Q/K/V 直接非连续访问仅支持 feature 致密、head/token 不重叠的正 stride；BSND `B>1` 还要求
-  batch 维可按 `T * tokenStride` 扁平化。已验证的 feature-gap、zero-stride、batch-gap view
-  自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
+  batch 维可按 `T * tokenStride` 扁平化。A6 例外：arch92 引擎按 batch stride 单独寻址，允许
+  `batchStride > T * tokenStride` 的 batch 间隔（不得重叠）。其它平台已验证的 feature-gap、
+  zero-stride、batch-gap view 自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
 - 当前 `K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
 - A2/A3 的内部时间窗口容量为 8，支持多窗口序列；A5 每段仍限制为 <=8；A6 按 token 递推，不受窗口限制。
 - state 最后两维必须为行主序稠密矩阵；slot/head 维可有间隔但不得重叠。

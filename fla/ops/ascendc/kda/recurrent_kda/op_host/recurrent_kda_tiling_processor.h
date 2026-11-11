@@ -306,14 +306,31 @@ private:
             OP_CHECK_IF(tokenStride > maxUint64 / seqLen,
                         OP_LOGE(ctx_.nodeName, "%s batch stride calculation overflows.", name),
                         return ge::GRAPH_FAILED);
-            const uint64_t expectedBatchStride = seqLen * tokenStride;
-            OP_CHECK_IF(static_cast<uint64_t>(strides[RKDA_DIM_0]) != expectedBatchStride,
-                        OP_LOGE(ctx_.nodeName,
-                                "%s batch stride must equal T * token stride for flattened BSND, "
-                                "but got %llu and expected %llu.",
-                                name, static_cast<unsigned long long>(strides[RKDA_DIM_0]),
-                                static_cast<unsigned long long>(expectedBatchStride)),
-                        return ge::GRAPH_FAILED);
+            const uint64_t denseBatchStride = seqLen * tokenStride;
+            const uint64_t batchStride = static_cast<uint64_t>(strides[RKDA_DIM_0]);
+            const uint64_t batchCount = static_cast<uint64_t>(shape.GetDim(RKDA_DIM_0));
+            if (ctx_.isA6 != 0) {
+                // A6 的 arch92 引擎按 (token / seqLen) * batchStride 定位 batch，
+                // 因此 batch 维允许与 token 维之间存在间隔；但 batch 之间不得重叠，
+                // 且最后一个 batch 的起点不能溢出。
+                OP_CHECK_IF(batchStride < denseBatchStride,
+                            OP_LOGE(ctx_.nodeName,
+                                    "%s batch stride overlaps: batch stride=%llu, minimum=%llu.",
+                                    name, static_cast<unsigned long long>(batchStride),
+                                    static_cast<unsigned long long>(denseBatchStride)),
+                            return ge::GRAPH_FAILED);
+                OP_CHECK_IF(batchStride > (maxUint64 - denseBatchStride) / (batchCount - 1),
+                            OP_LOGE(ctx_.nodeName, "%s batch stride calculation overflows.", name),
+                            return ge::GRAPH_FAILED);
+            } else {
+                OP_CHECK_IF(batchStride != denseBatchStride,
+                            OP_LOGE(ctx_.nodeName,
+                                    "%s batch stride must equal T * token stride for flattened BSND, "
+                                    "but got %llu and expected %llu.",
+                                    name, static_cast<unsigned long long>(batchStride),
+                                    static_cast<unsigned long long>(denseBatchStride)),
+                            return ge::GRAPH_FAILED);
+            }
         }
         return ge::GRAPH_SUCCESS;
     }
