@@ -389,9 +389,7 @@ ge::graphStatus RecurrentKdaTiling::GetAttrsInfo()
         return ge::GRAPH_FAILED;
     }
     tilingData_.scale = *attrs->GetAttrPointer<float>(ATTR_SCALE_INDEX);
-    OP_CHECK_IF(tilingData_.scale <= 0.0f,
-                OP_LOGE(context_->GetNodeName(), "scale must be positive, got %f", tilingData_.scale),
-                return ge::GRAPH_FAILED);
+    // scale 是公开的 query 系数，0 与负值在数学语义上合法，host 不额外收紧。
     tilingData_.outputFinalState = *attrs->GetAttrPointer<bool>(ATTR_OUTPUT_FINAL_STATE_INDEX) ? 1 : 0;
     tilingData_.inplaceFinalState = *attrs->GetAttrPointer<bool>(ATTR_INPLACE_FINAL_STATE_INDEX) ? 1 : 0;
     tilingData_.useQkL2norm = *attrs->GetAttrPointer<bool>(ATTR_USE_QK_L2NORM_INDEX) ? 1 : 0;
