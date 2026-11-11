@@ -25,8 +25,9 @@ constexpr int64_t RKDA_A6_DIM = 128;
 constexpr int64_t RKDA_A6_TOKEN_TILE = 32;
 constexpr int64_t RKDA_A6_INPUT_BUFFERS = 2;
 constexpr int64_t RKDA_A6_PARAMETER_BUFFERS = 2;
-// FP32 State bank 为 64 KiB，沿用 3 份；BF16 bank 为 32 KiB，多留一份用于初态预取。
-constexpr int64_t RKDA_A6_FP32_STATE_BANKS = 3;
+// State bank 固定放一片 [DIM, DIM]：FP32 64 KiB、BF16 32 KiB。A6 的 384 KiB 向量 UB
+// 允许两种 dtype 都留 4 份（FP32 共 364 544 B），把跨任务/跨 V 片的初态预取深度拉满。
+constexpr int64_t RKDA_A6_FP32_STATE_BANKS = 4;
 constexpr int64_t RKDA_A6_BF16_STATE_BANKS = 4;
 
 // A6 静态 UB 用量：State bank + 输入/输出双槽 + dt_bias 双槽 + VF scratch。

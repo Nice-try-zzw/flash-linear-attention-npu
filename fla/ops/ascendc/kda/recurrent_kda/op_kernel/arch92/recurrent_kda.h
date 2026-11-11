@@ -14,8 +14,7 @@
  * 与主线 A5 的 RecurrentKdaEngine 保持同一套算法与同步模型，差异来自 A6 的硬件预算
  * 与指令发射特性：
  *   - 向量 UB 为 384 KiB，每个 tile 的 token 数 4 -> 32：摊薄 tile 级的 DMA 与 Mutex 开销；
- *   - bank 跨度按 State dtype 计算（BF16 32 KiB / FP32 64 KiB），不再按 FP32 预留；
- *   - BF16 State 多留一份 bank（3 -> 4）用于跨任务初态预取，FP32 仍保持 3 份以适配向量 UB；
+ *   - bank 跨度按 State dtype 计算（BF16 32 KiB / FP32 64 KiB），两种 dtype 都用满 4 份；
  *   - A6 向量单元支持一长两短的三指令发射，V-first 热循环按四行展开，把独立的
  *     乘法/归约/搬出短指令交错到归约长指令的发射槽里。
  * V=256 不再单独实现：State 的 V 维按 DIM 切片，每片与 V=128 走同一套 bank、
@@ -36,11 +35,11 @@ using RecurrentKda::RecurrentKdaTilingData;
 // 布局常量与 host tiling 共用 recurrent_kda_struct.h 中的定义，单点修改。
 constexpr uint32_t DIM = static_cast<uint32_t>(RecurrentKda::RKDA_A6_DIM);
 // A6 每个 tile 的 token 上界：取 32 是为了在 384 KiB UB 内摊薄 tile 级开销，
-// 同时给 State bank 与双槽输入留出余量（FP32 布局下仍余约 84 KiB）。
+// 同时给 4 份 State bank 与双槽输入留出余量（FP32 布局下仍余约 28 KiB）。
 constexpr uint32_t TOKEN_TILE = static_cast<uint32_t>(RecurrentKda::RKDA_A6_TOKEN_TILE);
 constexpr uint32_t LAYOUT_BSND = 0;
-// FP32 bank 为 64 KiB，沿用 A5 已验证的 3 份布局；BF16 bank 为 32 KiB，
-// A6 多留一份用于跨任务初态预取。host 侧按真实 UB 预算复核。
+// 每个 bank 放一片 [DIM, DIM] State：FP32 64 KiB、BF16 32 KiB。A6 的 384 KiB 向量 UB
+// 让两种 dtype 都能留 4 份 bank（FP32 布局共 364 544 B），把初态预取深度拉满。
 template <typename State>
 constexpr uint32_t StateBanks()
 {
@@ -96,7 +95,7 @@ static_assert(UbBytes<bfloat16_t>() == static_cast<uint32_t>(RecurrentKda::RkdaA
               "A6 BF16 State UB ledger diverges from the host tiling formula");
 
 // 编译期只做保守校验；A6 实际 UB 由 host 读取平台信息后复核。
-// FP32 State（3 bank）占 299 008 B，BF16 State（4 bank）占 233 472 B。
+// FP32 State（4 bank）占 364 544 B，BF16 State（4 bank）占 233 472 B。
 constexpr uint32_t UB_LIMIT_BYTES = 384 * 1024;
 static_assert(UbBytes<float>() <= UB_LIMIT_BYTES, "A6 FP32 State UB exceeds the 384 KiB vector UB");
 static_assert(UbBytes<bfloat16_t>() <= UB_LIMIT_BYTES, "A6 BF16 State UB exceeds the 384 KiB vector UB");

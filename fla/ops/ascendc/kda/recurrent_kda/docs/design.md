@@ -182,7 +182,7 @@ A6（`ascend960dt`）例外：arch92 静态 UB 引擎按 tiling key 生成实例
 | A2 | `ascend910b` | 公共 AIV kernel | 无 |
 | A3 | `ascend910_93` | 公共 AIV kernel | 无 |
 | A5 | `ascend950` | arch35 特化 AIV kernel | RegBase/DataCopy 路径，并对 `K=128` 使用融合归约实现 |
-| A6 | `ascend960dt` | arch92 特化 AIV kernel | 静态 UB 引擎（State bank：BF16 4 份 / FP32 3 份、32 token/tile、资源 Mutex）；`V=128` 与 `V=256` 共用同一实现，`V=256` 按 128 切片串行推进 |
+| A6 | `ascend960dt` | arch92 特化 AIV kernel | 静态 UB 引擎（State bank：FP32/BF16 均 4 份、32 token/tile、资源 Mutex）；`V=128` 与 `V=256` 共用同一实现，`V=256` 按 128 切片串行推进 |
 
 ## 9. 精度设计
 
@@ -194,8 +194,8 @@ Q/K/V 公开输入为 BF16，gate/beta 保持 FP32/BF16/FP16 输入 dtype，并�
 当前实现已使用输入/输出双缓冲，并在 arch35 的 `K=128` 路径采用融合归约和 repeat DataCopy；后续优化仍应以
 状态搬运、向量流水和同步开销为重点。
 A6 的 `V=128` 与 `V=256` 复用同一套逐 token VF：按 384 KiB 向量 UB 把 tile 扩到 32 token 以摊薄
-tile 级 DMA 与 Mutex 开销（FP32 State 3 bank 布局共 299 008 B，另留 2 KiB 余量）；State bank 数按 dtype
-取 BF16 4 份 / FP32 3 份，并用 host 读到的真实 UB 预算做容量复核。`V=256` 不新增 State 布局，
+tile 级 DMA 与 Mutex 开销（FP32 State 4 bank 布局共 364 544 B，另留 2 KiB 余量）；State bank 数按 dtype
+统一取 4 份（FP32 64 KiB/份、BF16 32 KiB/份），并用 host 读到的真实 UB 预算做容量复核。`V=256` 不新增 State 布局，
 而是把 V 维按 128 切片、逐片串行走完整个序列，bank 大小与 V=128 一致；代价是 Q/K/gate/beta 的
 搬入与 normalize 按片重复一次。布局常量与字节公式定义在
 `op_kernel/recurrent_kda_struct.h`，host 与 kernel 共用同一份，kernel 侧再用 `static_assert`
