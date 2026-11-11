@@ -655,8 +655,11 @@ public:
                     Mutex::Unlock<PIPE_V>(OUTPUT_MUTEX[buffer]);
                     const uint64_t outOffset =
                         (uint64_t(start) * tiling_->nv + head) * tiling_->dv + valueOffset;
+                    // out 的 token 跨度恒为 nv*dv，本片只写其中 DIM 列：行间隔是
+                    // nv*dv - DIM，而不是 (nv-1)*dv。只有 dv == DIM 时两者相等，
+                    // V=256 下少算 (dv-DIM) 会让每一行都左移，越界部分不写。
                     const DataCopyExtParams outputParams{rows, DIM * sizeof(bfloat16_t), 0,
-                        uint32_t((tiling_->nv - 1) * tiling_->dv * sizeof(bfloat16_t)), 0};
+                        uint32_t((uint64_t(tiling_->nv) * tiling_->dv - DIM) * sizeof(bfloat16_t)), 0};
                     Mutex::Lock<PIPE_MTE3>(OUTPUT_MUTEX[buffer]);
                     DataCopyPad(outputGm_[outOffset], outputTile_[buffer], outputParams);
                     Mutex::Unlock<PIPE_MTE3>(OUTPUT_MUTEX[buffer]);
@@ -833,32 +836,48 @@ private:
     // value 按 V 片搬入：列偏移 valueOffset，行内只取 DIM 个元素，
     // 其余位置由 valueTokenStride 的行间隔跳过。q/k/gate/beta 与 V 片无关，
     // 但切片在任务内串行，tile 缓冲会被后续 tile 覆盖，因此每片重新搬入。
+    // BSND 的 batch 跨度允许大于 T*tokenStride（A6 直读 batch-gap view）：此时
+    // 一个 tile 跨过 batch 边界后行间隔不再是 tokenStride，必须按 batch 分段搬。
+    __aicore__ inline void CopyQkvTile(LocalTensor<bfloat16_t> &destination,
+        const GlobalTensor<bfloat16_t> &source, int64_t start, uint16_t rows, uint64_t head,
+        uint64_t batchStride, uint64_t tokenStride, uint64_t headStride, uint32_t featureOffset = 0)
+    {
+        const bool splitBatches = tiling_->layout == LAYOUT_BSND && !tiling_->hasCuSeqlens &&
+            tiling_->seqLen != 0 && batchStride != uint64_t(tiling_->seqLen) * tokenStride;
+        uint16_t copied = 0;
+        while (copied < rows) {
+            uint16_t count = rows - copied;
+            if (splitBatches) {
+                const uint64_t remaining = tiling_->seqLen - uint64_t(start + copied) % tiling_->seqLen;
+                if (remaining < count) {
+                    count = static_cast<uint16_t>(remaining);
+                }
+            }
+            const uint64_t offset = InputOffset(start + copied, head, batchStride, tokenStride, headStride);
+            const DataCopyExtParams params{count, DIM * sizeof(bfloat16_t),
+                uint32_t((tokenStride - DIM) * sizeof(bfloat16_t)), 0, 0};
+            DataCopyPad(destination[copied * DIM], source[offset + featureOffset], params,
+                DataCopyPadExtParams<bfloat16_t>{false, 0, 0, bfloat16_t(0)});
+            copied += count;
+        }
+    }
+
     __aicore__ inline void CopyInputTile(uint32_t buffer, int64_t start, uint16_t rows,
                                         uint64_t keyHead, uint64_t head, uint32_t valueOffset)
     {
-        const uint64_t queryOffset = InputOffset(start, keyHead, tiling_->queryBatchStride,
-            tiling_->queryTokenStride, tiling_->queryHeadStride);
-        const uint64_t keyOffset = InputOffset(start, keyHead, tiling_->keyBatchStride,
-            tiling_->keyTokenStride, tiling_->keyHeadStride);
-        const uint64_t valueOffsetBase = InputOffset(start, head, tiling_->valueBatchStride,
-            tiling_->valueTokenStride, tiling_->valueHeadStride) + valueOffset;
         const uint64_t gateOffset = (uint64_t(start) * tiling_->nv + head) * DIM;
         const uint64_t betaOffset = uint64_t(start) * tiling_->nv + head;
-        const DataCopyPadExtParams<bfloat16_t> pad{false, 0, 0, bfloat16_t(0)};
-        const DataCopyExtParams queryParams{rows, DIM * sizeof(bfloat16_t),
-            uint32_t((tiling_->queryTokenStride - DIM) * sizeof(bfloat16_t)), 0, 0};
-        const DataCopyExtParams keyParams{rows, DIM * sizeof(bfloat16_t),
-            uint32_t((tiling_->keyTokenStride - DIM) * sizeof(bfloat16_t)), 0, 0};
-        const DataCopyExtParams valueParams{rows, DIM * sizeof(bfloat16_t),
-            uint32_t((tiling_->valueTokenStride - DIM) * sizeof(bfloat16_t)), 0, 0};
         const DataCopyExtParams gateParams{rows, DIM * sizeof(Gate),
             uint32_t((tiling_->nv - 1) * DIM * sizeof(Gate)), 0, 0};
         const DataCopyExtParams betaParams{rows, sizeof(Beta),
             uint32_t((tiling_->nv - 1) * sizeof(Beta)), 0, 0};
         Mutex::Lock<PIPE_MTE2>(INPUT_MUTEX[buffer]);
-        DataCopyPad(queryTile_[buffer], queryGm_[queryOffset], queryParams, pad);
-        DataCopyPad(keyTile_[buffer], keyGm_[keyOffset], keyParams, pad);
-        DataCopyPad(valueTile_[buffer], valueGm_[valueOffsetBase], valueParams, pad);
+        CopyQkvTile(queryTile_[buffer], queryGm_, start, rows, keyHead,
+            tiling_->queryBatchStride, tiling_->queryTokenStride, tiling_->queryHeadStride);
+        CopyQkvTile(keyTile_[buffer], keyGm_, start, rows, keyHead,
+            tiling_->keyBatchStride, tiling_->keyTokenStride, tiling_->keyHeadStride);
+        CopyQkvTile(valueTile_[buffer], valueGm_, start, rows, head,
+            tiling_->valueBatchStride, tiling_->valueTokenStride, tiling_->valueHeadStride, valueOffset);
         DataCopyPad(gateTile_[buffer], gateGm_[gateOffset], gateParams,
             DataCopyPadExtParams<Gate>{false, 0, 0, Gate(0)});
         DataCopyPad(betaTile_[buffer], betaGm_[betaOffset], betaParams,
