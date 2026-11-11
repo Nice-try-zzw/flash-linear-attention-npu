@@ -902,4 +902,3 @@ private:
 } // namespace RecurrentKdaA6
 
 #endif // __RECURRENT_KDA_ARCH92_ENGINE_H_
-

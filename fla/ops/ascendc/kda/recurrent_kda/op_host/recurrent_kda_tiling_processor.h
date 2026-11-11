@@ -734,15 +734,34 @@ private:
         return ge::GRAPH_SUCCESS;
     }
 
-    int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
+    // A6 的 arch92 兼容实现（RKDALegacy）独立计算窗口预算，不复用 A5 的判定条件：
+    // 它的 raw 缓冲是单槽，beta 队列固定为 MAX_MTP * BF16_NUM_PER_BLOCK，与 nv 无关。
+    int64_t CalcA6LegacyFixedUbBytes(int64_t aDv, int64_t aDk) const
     {
         const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
-        // A5(arch35) 与 A6(arch92 legacy) 都是 BUFFER_NUM=1，只有 A2/A3 generic 走双槽 packedInput。
-        const int64_t rawBufferNum = (ctx_.isA5 != 0 || ctx_.isA6 != 0) ? 1 : 2;
-        // A2/A3 generic 的 beta 队列长度随 nv 伸缩；A5(arch35) 按 aNv 对齐；
-        // A6(arch92 legacy) 的 betaUbSize = MAX_MTP * BF16_NUM_PER_BLOCK = 8*16，与 nv 无关。
-        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv :
-            (ctx_.isA6 != 0 ? static_cast<int64_t>(RKDA_MAX_MTP) * 16 : static_cast<int64_t>(nv));
+        const int64_t betaHeads = static_cast<int64_t>(RKDA_MAX_MTP) * 16;
+        int64_t usedUbBytes = rawBytes;
+        usedUbBytes += RKDA_MAX_MTP * 4 * betaHeads;
+        usedUbBytes += 64 + RKDA_UB_GUARD_BYTES;
+        return usedUbBytes;
+    }
+
+    int64_t CalcA6LegacyWorkingUbBytes(int64_t aDv, int64_t aDk) const
+    {
+        const int64_t betaHeads = static_cast<int64_t>(RKDA_MAX_MTP) * 16;
+        int64_t usedUbBytes = CalcA6LegacyFixedUbBytes(aDv, aDk);
+        usedUbBytes += RKDA_MAX_MTP * (4 * aDv + 12 * aDk + 4 * betaHeads);
+        return usedUbBytes;
+    }
+
+    int64_t CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
+    {
+        if (ctx_.isA6 != 0) {
+            return CalcA6LegacyFixedUbBytes(aDv, aDk);
+        }
+        const int64_t rawBytes = RKDA_MAX_MTP * (8 * aDk + 2 * aDv);
+        const int64_t rawBufferNum = ctx_.isA5 != 0 ? 1 : 2;
+        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
         int64_t usedUbBytes = rawBufferNum * rawBytes;
         usedUbBytes += RKDA_MAX_MTP * 4 * betaHeads;
         usedUbBytes += 64 + RKDA_UB_GUARD_BYTES;
@@ -751,8 +770,10 @@ private:
 
     int64_t CalcWorkingUbBytes(int64_t aNv, int64_t aDv, int64_t aDk, uint32_t nv) const
     {
-        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv :
-            (ctx_.isA6 != 0 ? static_cast<int64_t>(RKDA_MAX_MTP) * 16 : static_cast<int64_t>(nv));
+        if (ctx_.isA6 != 0) {
+            return CalcA6LegacyWorkingUbBytes(aDv, aDk);
+        }
+        const int64_t betaHeads = ctx_.isA5 != 0 ? aNv : static_cast<int64_t>(nv);
         int64_t usedUbBytes = CalcFixedUbBytes(aNv, aDv, aDk, nv);
         usedUbBytes += RKDA_MAX_MTP * (4 * aDv + 12 * aDk + 4 * betaHeads);
         return usedUbBytes;
