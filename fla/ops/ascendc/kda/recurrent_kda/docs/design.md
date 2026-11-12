@@ -100,7 +100,7 @@ cu_seqlens、indices、accepted 是设备 tensor，host 检查 shape/dtype 等�
 
 无 indices 时初态槽位为请求编号；有 indices 且无 accepted 时，使用请求首 token 对应的槽位。有 accepted 时使用 `begin+accepted-1` 对应槽位：packed 一维 indices 要求 `1<=accepted<=请求长度`，二维 speculative indices 要求 `1<=accepted<=max_step`，允许超过本次请求长度，但选中的初态槽位仍须在 State pool 内。每个有效 token 的写槽也须在 pool 内。同一请求可重复写槽，按前述 MTE3 顺序保护；不同活跃请求的写槽不得冲突，这一要求由调用方保证。
 
-kernel 入口唯一显式模板参数为 `uint32_t KERNEL_MODE`，host 用 `GET_TPL_TILING_KEY(kernelMode)` 生成 TilingKey。mode 值0为 `RKDA_TPL_COMPAT`，仅由 A2/A3 选择；A5 与 A6（`ascend960dt`）的 V=128/V=256 均按 State 布局和融合条件选择下表的1～4。V 维度、State dtype、是否 indexed 以及是否写 State 不另增加 mode。A6 在 device 侧不生成 `RKDA_TPL_COMPAT` 实例，`COMPAT` 只服务于 A2/A3 与 A5 的公共 kernel。
+kernel 入口唯一显式模板参数为 `uint32_t KERNEL_MODE`，host 用 `GET_TPL_TILING_KEY(kernelMode)` 生成 TilingKey。mode 值0为 `RKDA_TPL_COMPAT`，仅由 A2/A3 选择；A5 与 A6（`ascend960dt`）的 V=128/V=256 均按 State 布局和融合条件选择下表的1～4。V 维度、State dtype、是否 indexed 以及是否写 State 不另增加 mode。tiling key 只用于区分功能实现，不按平台裁剪实例：各平台统一声明上述 5 档且均为 AIV_ONLY，平台差异由 host 选择哪个 mode 来体现，A6 不下发 `COMPAT`。
 
 State、gate、beta 的 dtype 由算子 DataTypeList 对应的编译配置提供 `DTYPE_INITIAL_STATE`、`DTYPE_GATE`、`DTYPE_BETA` 宏；这些宏再作为 Engine/VF 的类型模板实参。它们不是入口额外的显式模板参数，也不编码到本算子的 `KERNEL_MODE` 中。
 
