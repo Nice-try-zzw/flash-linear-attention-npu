@@ -13,7 +13,7 @@
 
 A5 的输入 view 扩展、State view/别名前置校验和资源规划按实际架构启用。A2/A3 的通用 kernel 恢复为 PR 基线，保留 token-major 直接读取条件、BSND 的严格批间距、原分核公式和 ViewCopy 路径；A5 的 head-major 输入支持不扩展到 A2/A3。公共结构化错误码继续保留，auto-sync 配置不在本次修改范围。
 
-A6 与 A5 采用同一套输入 view 与 QKV 直读规则（含无 `cu_seqlens` 时的 batch 间隔和 head-major），但 UB 布局与调度参数独立：`TOKEN_TILE=32`、State bank 4 份、`dv=256` 在引擎内按 128 切片。A6 的 UB 账本由 `PlanA6Ub()` 与 kernel `static_assert` 两侧共同约束。
+A6（`ascend960dt`）与 A5 共用同一套输入 view 与 QKV 直读规则（含无 `cu_seqlens` 时的 batch 间隔与 head-major），但 UB 布局和调度参数独立：`TOKEN_TILE=32`、State bank 4 份、`dv=256` 在引擎内按 128 切片。A6 的 UB 账本由 host `PlanA6Ub()` 与 kernel `static_assert` 两侧共同约束。
 
 State 输入与输出沿用远程主线已修复的公开语义：非原位模式直接读取初态，仅写入有效目标槽，不克隆或预填整个输出池。
 
