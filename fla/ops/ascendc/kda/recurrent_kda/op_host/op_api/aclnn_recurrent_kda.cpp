@@ -20,7 +20,6 @@
 #include "opdev/op_dfx.h"
 #include "opdev/op_executor.h"
 #include "opdev/op_log.h"
-#include "opdev/platform.h"
 #include "opdev/tensor_view_utils.h"
 
 #include <cstring>
@@ -146,9 +145,6 @@ static bool ParseLayout(const char *layout, RecurrentKdaLayout &parsed)
     return false;
 }
 
-// BSND 的 QKV 必须能整块扁平化为 T * tokenStride，batch 维不允许间隔：
-// varlen（cu_seqlens）下请求可能跨物理 batch 行，只有稠密 batch 跨度才能保证
-// 线性寻址正确；公开 aclnn 通路对 batch-gap view 一律回退连续化（与 A5 一致）。
 bool IsSupportedQkvView(const aclTensor *tensor, RecurrentKdaLayout layout)
 {
     if (tensor == nullptr) {
