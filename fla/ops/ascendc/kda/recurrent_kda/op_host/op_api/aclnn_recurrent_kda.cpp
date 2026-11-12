@@ -146,10 +146,10 @@ static bool ParseLayout(const char *layout, RecurrentKdaLayout &parsed)
     return false;
 }
 
-// A6（DAV_9201）的 arch92 引擎按 (token / seqLen) * batchStride 定位 batch，
-// 因此 BSND 的 batch 维允许与 token 维之间存在间隔；A2/A3/A5 的公共 kernel
-// 仍要求整块可扁平化为 T * tokenStride。两种规则分开判定，不互相继承。
-bool IsSupportedQkvView(const aclTensor *tensor, RecurrentKdaLayout layout, bool allowBatchGap)
+// BSND 的 QKV 必须能整块扁平化为 T * tokenStride，batch 维不允许间隔：
+// varlen（cu_seqlens）下请求可能跨物理 batch 行，只有稠密 batch 跨度才能保证
+// 线性寻址正确；公开 aclnn 通路对 batch-gap view 一律回退连续化（与 A5 一致）。
+bool IsSupportedQkvView(const aclTensor *tensor, RecurrentKdaLayout layout)
 {
     if (tensor == nullptr) {
         return false;
@@ -190,22 +190,8 @@ bool IsSupportedQkvView(const aclTensor *tensor, RecurrentKdaLayout layout, bool
 
     if (layout == RecurrentKdaLayout::BSND && Dim(tensor, DIM0) > 1) {
         const int64_t seqLen = Dim(tensor, DIM1);
-        const int64_t batch = Dim(tensor, DIM0);
-        if (tokenStride > maxInt64 / seqLen) {
+        if (tokenStride > maxInt64 / seqLen || strides[DIM0] != seqLen * tokenStride) {
             return false;
-        }
-        const int64_t denseBatchStride = seqLen * tokenStride;
-        if (!allowBatchGap) {
-            if (strides[DIM0] != denseBatchStride) {
-                return false;
-            }
-        } else {
-            // batch 维允许间隔，但不允许与相邻 batch 重叠；最后一个 batch 的
-            // 起点加上一个 batch 的跨度不能溢出 int64。
-            if (strides[DIM0] < denseBatchStride ||
-                strides[DIM0] > (maxInt64 - denseBatchStride) / (batch - 1)) {
-                return false;
-            }
         }
     }
     return true;
@@ -577,16 +563,14 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     CHECK_RET(CheckDtypeValid(params), ACLNN_ERR_PARAM_INVALID);
     RecurrentKdaLayout parsedLayout = RecurrentKdaLayout::BSND;
     CHECK_RET(ParseLayout(params.layout, parsedLayout), ACLNN_ERR_PARAM_INVALID);
-    // A6 的 arch92 引擎按 batch stride 单独寻址，direct-view 判定需要与 A2/A3/A5 分开。
-    const bool isA6 = GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_9201;
     CHECK_RET(CheckShape(params, parsedLayout), ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckQkvMaterializationSafety(params.query, parsedLayout, "query") &&
                   CheckQkvMaterializationSafety(params.key, parsedLayout, "key") &&
                   CheckQkvMaterializationSafety(params.value, parsedLayout, "value"),
               ACLNN_ERR_PARAM_INVALID);
-    const bool querySupportsDirect = IsSupportedQkvView(params.query, parsedLayout, isA6);
-    const bool keySupportsDirect = IsSupportedQkvView(params.key, parsedLayout, isA6);
-    const bool valueSupportsDirect = IsSupportedQkvView(params.value, parsedLayout, isA6);
+    const bool querySupportsDirect = IsSupportedQkvView(params.query, parsedLayout);
+    const bool keySupportsDirect = IsSupportedQkvView(params.key, parsedLayout);
+    const bool valueSupportsDirect = IsSupportedQkvView(params.value, parsedLayout);
     const bool queryUsesDirectView = !IsContiguous(params.query) && querySupportsDirect;
     const bool keyUsesDirectView = !IsContiguous(params.key) && keySupportsDirect;
     const bool valueUsesDirectView = !IsContiguous(params.value) && valueSupportsDirect;

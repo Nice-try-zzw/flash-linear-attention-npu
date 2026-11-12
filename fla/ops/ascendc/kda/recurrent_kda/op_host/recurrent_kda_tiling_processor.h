@@ -309,10 +309,11 @@ private:
             const uint64_t denseBatchStride = seqLen * tokenStride;
             const uint64_t batchStride = static_cast<uint64_t>(strides[RKDA_DIM_0]);
             const uint64_t batchCount = static_cast<uint64_t>(shape.GetDim(RKDA_DIM_0));
-            if (ctx_.isA6 != 0) {
-                // A6 的 arch92 引擎按 (token / seqLen) * batchStride 定位 batch，
-                // 因此 batch 维允许与 token 维之间存在间隔；但 batch 之间不得重叠，
-                // 且最后一个 batch 的起点不能溢出。
+            // A5/A6 的引擎没有 cu_seqlens 时按 (token / seqLen) * batchStride 单独寻址 batch，
+            // 因此允许 batch 与 token 维之间留间隔；varlen 下请求可能跨物理 batch 行，
+            // 只有稠密 batch 跨度才能保证线性寻址正确。A2/A3 始终要求稠密。
+            const bool batchGapAllowed = (ctx_.isA5 != 0 || ctx_.isA6 != 0) && ctx_.hasCuSeqlens == 0;
+            if (batchGapAllowed) {
                 OP_CHECK_IF(batchStride < denseBatchStride,
                             OP_LOGE(ctx_.nodeName,
                                     "%s batch stride overlaps: batch stride=%llu, minimum=%llu.",
@@ -325,7 +326,8 @@ private:
             } else {
                 OP_CHECK_IF(batchStride != denseBatchStride,
                             OP_LOGE(ctx_.nodeName,
-                                    "%s batch stride must equal T * token stride for flattened BSND, "
+                                    "%s batch stride must equal T * token stride "
+                                    "(dense BSND, or any BSND with cu_seqlens), "
                                     "but got %llu and expected %llu.",
                                     name, static_cast<unsigned long long>(batchStride),
                                     static_cast<unsigned long long>(denseBatchStride)),
@@ -630,17 +632,15 @@ private:
         tiling.keyHeadStride = static_cast<uint64_t>(keyStrides[headDim]);
         tiling.valueTokenStride = static_cast<uint64_t>(valueStrides[tokenDim]);
         tiling.valueHeadStride = static_cast<uint64_t>(valueStrides[headDim]);
-        // BSND 每个 batch 的首地址跨度；TND 只有一条序列，A6 引擎按 token 线性寻址。
+        // BSND 每个 batch 的首地址跨度；TND 只有一条序列、kernel 不读该字段。
+        // varlen 下按逻辑 token 线性寻址（kernel 走 token * tokenStride），跨度写 0。
         const size_t batchDim = RKDA_DIM_0;
-        tiling.queryBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
-            static_cast<uint64_t>(tiling.seqLen) * tiling.queryTokenStride :
-            static_cast<uint64_t>(queryStrides[batchDim]);
-        tiling.keyBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
-            static_cast<uint64_t>(tiling.seqLen) * tiling.keyTokenStride :
-            static_cast<uint64_t>(keyStrides[batchDim]);
-        tiling.valueBatchStride = ctx_.layout == RKDA_LAYOUT_TND ?
-            static_cast<uint64_t>(tiling.seqLen) * tiling.valueTokenStride :
-            static_cast<uint64_t>(valueStrides[batchDim]);
+        tiling.queryBatchStride = ctx_.hasCuSeqlens != 0 ?
+            0 : static_cast<uint64_t>(queryStrides[batchDim]);
+        tiling.keyBatchStride = ctx_.hasCuSeqlens != 0 ?
+            0 : static_cast<uint64_t>(keyStrides[batchDim]);
+        tiling.valueBatchStride = ctx_.hasCuSeqlens != 0 ?
+            0 : static_cast<uint64_t>(valueStrides[batchDim]);
         const auto stateInStrides = ResolveStateStrides(false);
         const auto stateOutStrides = ResolveStateStrides(true);
         tiling.stateInStride0 = static_cast<uint64_t>(stateInStrides[RKDA_DIM_0]);

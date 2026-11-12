@@ -117,7 +117,7 @@ token capacity。
 | `ssmStateStride` | `uint32_t` | 二维 speculative state 索引的行 stride；packed 一维索引时为 0 |
 | `query/key/value TokenStride` | `uint64_t` | Q/K/V 相邻逻辑 token 的元素 stride |
 | `query/key/value HeadStride` | `uint64_t` | Q/K/V 相邻 head 的元素 stride |
-| `query/key/value BatchStride` | `uint64_t` | BSND 每个 batch 的首地址跨度；TND 为 `seqLen*tokenStride` |
+| `query/key/value BatchStride` | `uint64_t` | BSND 每个 batch 的首地址跨度；有 `cu_seqlens` 时写 0（kernel 按 token 线性寻址） |
 | `vStep` | `uint32_t` | 单次处理的 V 方向步长 |
 | `stateOutBufferNum` / `attnOutBufferNum` | `uint32_t` | UB ring buffer 数；A6 引擎下 `stateOutBufferNum` 表示 State bank 数 |
 | `scale` / `lowerBound` | `float` | query scale 与 safe gate 下界 |
@@ -237,10 +237,11 @@ A2/A5 精度验证过程中修复以下问题：
 ## 13. 已知限制与演进计划
 
 - 当前仅支持 BF16 QKV。
-- Q/K/V 直接非连续访问仅支持 feature 致密、head/token 不重叠的正 stride；BSND `B>1` 还要求
-  batch 维可按 `T * tokenStride` 扁平化。A6 例外：arch92 引擎按 batch stride 单独寻址，允许
-  `batchStride > T * tokenStride` 的 batch 间隔（不得重叠）。其它平台已验证的 feature-gap、
-  zero-stride、batch-gap view 自动回退连续化；token/head 置换或正 stride 重叠 descriptor 明确拒绝。
+- Q/K/V 直接非连续访问仅支持 feature 致密、head/token 不重叠的正 stride；BSND `B>1` 要求
+  batch 维可按 `T * tokenStride` 扁平化。A5/A6 的 L0 直调在没有 `cu_seqlens` 时允许 batch 间隔
+  （不得重叠），带 `cu_seqlens` 时请求可能跨物理 batch 行，host 要求 `batchStride == T * tokenStride`
+  并拒绝其它取值。公开 Python/aclnn 对 feature-gap、zero-stride、batch-gap view 一律先连续化；
+  token/head 置换或正 stride 重叠 descriptor 明确拒绝。
 - 当前 `K/V` 仅支持 `K=128,V=128` 或 `K=128,V=256`。
 - A2/A3 的内部时间窗口容量为 8，支持多窗口序列；A5 每段仍限制为 <=8；A6 按 token 递推，不受窗口限制。
 - state 最后两维必须为行主序稠密矩阵；slot/head 维可有间隔但不得重叠。
