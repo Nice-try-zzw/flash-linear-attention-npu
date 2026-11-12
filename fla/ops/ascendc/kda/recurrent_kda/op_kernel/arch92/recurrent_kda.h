@@ -837,8 +837,8 @@ private:
     // 其余位置由 valueTokenStride 的行间隔跳过。q/k/gate/beta 与 V 片无关，
     // 但切片在任务内串行，tile 缓冲会被后续 tile 覆盖，因此每片重新搬入。
     // 整 tile 一条 DataCopyPad：无 cu_seqlens 时一个 request 就是一行物理 batch，
-    // tile 不会跨 batch；有 cu_seqlens 时 host 已要求 batchStride == T*tokenStride
-    // 并把跨度写成 0，输入按逻辑 token 线性排列。
+    // tile 不会跨 batch；有 cu_seqlens 时 host 已要求 batchStride == T*tokenStride，
+    // 输入按逻辑 token 线性排列。
     __aicore__ inline void CopyInputTile(uint32_t buffer, int64_t start, uint16_t rows,
                                         uint64_t keyHead, uint64_t head, uint32_t valueOffset)
     {

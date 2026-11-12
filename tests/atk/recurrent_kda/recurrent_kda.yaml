@@ -167,7 +167,7 @@ inputs:
       values: [string]
     ranges:
       valid:
-        values: ["ascend910b", "ascend910_93", "ascend950", "ascend960dt"]
+        values: ["ascend910b", "ascend910_93", "ascend950"]
       invalid:
         values: []
   - name: route

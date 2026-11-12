@@ -56,6 +56,13 @@ static constexpr int64_t RKDA_UB_GUARD_BYTES = 2048;
 static constexpr size_t RKDA_SYS_WORKSPACE_SIZE = 16U * 1024U * 1024U;
 // On A5, broadTmp aliases state in UB when K hits this fused-reduce size.
 static constexpr int64_t RKDA_FUSED_REDUCE_K = 128;
+// A6(DAV_9201) 静态 UB 引擎的布局常量定义在 op_kernel/recurrent_kda_struct.h，
+// host 与 kernel 共用同一份，避免各自维护。
+using RecurrentKda::RKDA_A6_BF16_STATE_BANKS;
+using RecurrentKda::RKDA_A6_DIM;
+using RecurrentKda::RKDA_A6_FP32_STATE_BANKS;
+using RecurrentKda::RKDA_A6_INPUT_BUFFERS;
+using RecurrentKda::RKDA_A6_TOKEN_TILE;
 
 struct RecurrentKdaTilingContext {
     const char *nodeName = "RecurrentKda";
@@ -105,6 +112,9 @@ struct RecurrentKdaTilingContext {
     uint64_t aivNum = 0;
     uint64_t ubSize = 0;
     uint32_t isA5 = 0;
+    // A6(ascend960dt, DAV_9201)：V=128 与 V=256 都走 arch92 静态 UB 引擎，
+    // V=256 在引擎内按 DIM 切片；UB 预算按平台实际值复核。
+    uint32_t isA6 = 0;
 };
 
 class RecurrentKdaTilingProcessor {
@@ -114,7 +124,7 @@ public:
     ge::graphStatus ProcessShapes(RecurrentKdaTilingData &tiling) const
     {
         // Validate byte products before dense-stride and device-field arithmetic.
-        if (ctx_.isA5 != 0) {
+        if (ctx_.isA5 != 0 || ctx_.isA6 != 0) {
             const uint64_t limit = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
             const std::array<const gert::Shape *, 6> shapes = {{
                 &ctx_.queryShape, &ctx_.keyShape, &ctx_.valueShape,
@@ -145,6 +155,11 @@ public:
         tiling.a5HeadRatio = 0;
         if (ctx_.isA5 != 0) {
             return PlanA5Ub(tiling);
+        }
+        if (ctx_.isA6 != 0) {
+            // A6 的 V=128 与 V=256 都由 arch92 静态 UB 引擎接管：UB 布局、buffer 数
+            // 与 V 切片在编译期确定，不需要公共 kernel 的 vStep 搜索。
+            return PlanA6Ub(tiling);
         }
         UbCalcContext ubCalcCtx;
         if (InitLegacyUbContext(tiling, ubCalcCtx) != ge::GRAPH_SUCCESS) return ge::GRAPH_FAILED;
@@ -276,7 +291,10 @@ private:
                     ReportInvalid("query/key/value/gate/beta", "%s head stride calculation overflows.", name),
                     return ge::GRAPH_FAILED);
         const uint64_t tokenCount = static_cast<uint64_t>(shape.GetDim(tokenDim));
-        OP_CHECK_IF(ctx_.isA5 && tokenCount > 1 &&
+        // A5/A6 的引擎按 token/head stride 逐个定位，支持 head-major 与 batch 间隔；
+        // A2/A3 的公共 kernel 只接受 token-major 的稠密 batch 跨度。
+        const bool engineAllowsHeadMajor = ctx_.isA5 != 0 || ctx_.isA6 != 0;
+        OP_CHECK_IF(engineAllowsHeadMajor && tokenCount > 1 &&
                         tokenStride > (maxUint64 - featureCount) / (tokenCount - 1),
                     ReportInvalid("query/key/value/gate/beta", "%s token span calculation overflows.", name),
                     return ge::GRAPH_FAILED);
@@ -284,7 +302,7 @@ private:
         const uint64_t headMajorSpan = (tokenCount - 1) * tokenStride + featureCount;
         const bool tokenMajor = tokenStride >= tokenMajorSpan;
         const bool headMajor = headStride >= headMajorSpan;
-        OP_CHECK_IF(!tokenMajor && (!ctx_.isA5 || !headMajor),
+        OP_CHECK_IF(!tokenMajor && (!engineAllowsHeadMajor || !headMajor),
                     ReportInvalid("query/key/value/gate/beta", "%s token/head axes overlap.", name),
                     return ge::GRAPH_FAILED);
 
@@ -301,7 +319,7 @@ private:
                         ReportInvalid("query/key/value/gate/beta", "%s batch stride calculation overflows.", name),
                         return ge::GRAPH_FAILED);
             const uint64_t expectedBatchStride = seqLen * tokenStride;
-            OP_CHECK_IF((!ctx_.isA5 || ctx_.hasCuSeqlens) &&
+            OP_CHECK_IF((!engineAllowsHeadMajor || ctx_.hasCuSeqlens) &&
                             static_cast<uint64_t>(strides[RKDA_DIM_0]) != expectedBatchStride,
                         ReportInvalid("query/key/value",
                             "%s BSND batch stride must equal seqLen * tokenStride on A2/A3 or with cu_seqlens; "
@@ -740,6 +758,29 @@ private:
     ge::graphStatus SelectBlockCount(RecurrentKdaTilingData &tiling) const
     {
         UpdateDynamicBlockDimByTaskUnits(tiling);
+        return ge::GRAPH_SUCCESS;
+    }
+
+    ge::graphStatus PlanA6Ub(RecurrentKdaTilingData &tiling) const
+    {
+        const int64_t ubSize = static_cast<int64_t>(ctx_.ubSize);
+        const int64_t stateBytes = (ctx_.stateDtype == ge::DT_FLOAT) ? 4 : 2;
+        const int64_t banks = (ctx_.stateDtype == ge::DT_FLOAT) ?
+                                  RKDA_A6_FP32_STATE_BANKS : RKDA_A6_BF16_STATE_BANKS;
+        // 静态布局之外再留出一段余量，避免与框架占用的尾部空间重叠。
+        const int64_t usedBytes =
+            RecurrentKda::RkdaA6UbBytes(banks, RKDA_A6_TOKEN_TILE, stateBytes) + RKDA_UB_GUARD_BYTES;
+        OP_CHECK_IF(usedBytes > ubSize,
+                    ReportInvalid("UB/shape",
+                            "A6 static UB needs %ld bytes but only %ld are available.", usedBytes, ubSize),
+                    return ge::GRAPH_FAILED);
+        tiling.ubCalSize = static_cast<uint32_t>(ubSize);
+        tiling.ubRestBytes = static_cast<uint32_t>(ubSize - usedBytes);
+        // arch92 引擎在编译期自行布局，并把 V 维按 RKDA_A6_DIM 切片串行处理；
+        // 以下字段只用于保持 tiling 语义一致，引擎不读取。
+        tiling.vStep = static_cast<uint32_t>(RKDA_A6_DIM);
+        tiling.stateOutBufferNum = static_cast<uint32_t>(banks);
+        tiling.attnOutBufferNum = static_cast<uint32_t>(RKDA_A6_INPUT_BUFFERS);
         return ge::GRAPH_SUCCESS;
     }
 
